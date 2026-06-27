@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import {
   loadSourceMediaGallery,
@@ -13,6 +14,36 @@ import type { MediaGalleryPost, ProviderKey, SourceMediaGallery } from '../../do
 
 interface ProfileViewPageProps {
   initialSourceId?: string
+}
+
+type ViewMode = 'day' | 'grid'
+
+const VIEW_MODE_STORAGE_KEY = 'profileView.mode'
+const DENSITY_STORAGE_KEY = 'profileView.density'
+
+/** Largura mínima do thumbnail (px) por nível de densidade — do mais denso ao maior. */
+const DENSITY_STEPS = [110, 140, 160, 190, 230] as const
+const DEFAULT_DENSITY_INDEX = 2 // 160px, o tamanho original
+
+function readStoredMode(): ViewMode {
+  try {
+    return localStorage.getItem(VIEW_MODE_STORAGE_KEY) === 'grid' ? 'grid' : 'day'
+  } catch {
+    return 'day'
+  }
+}
+
+function readStoredDensity(): number {
+  try {
+    const stored = localStorage.getItem(DENSITY_STORAGE_KEY)
+    if (stored !== null) {
+      const raw = Number(stored)
+      if (Number.isInteger(raw) && raw >= 0 && raw < DENSITY_STEPS.length) return raw
+    }
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_DENSITY_INDEX
 }
 
 interface FlatItem {
@@ -58,6 +89,24 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>()
   const [lightboxIndex, setLightboxIndex] = useState<number>()
+  const [viewMode, setViewMode] = useState<ViewMode>(readStoredMode)
+  const [densityIndex, setDensityIndex] = useState<number>(readStoredDensity)
+
+  // Persiste as preferências de visualização.
+  useEffect(() => {
+    try {
+      localStorage.setItem(VIEW_MODE_STORAGE_KEY, viewMode)
+    } catch {
+      /* ignore */
+    }
+  }, [viewMode])
+  useEffect(() => {
+    try {
+      localStorage.setItem(DENSITY_STORAGE_KEY, String(densityIndex))
+    } catch {
+      /* ignore */
+    }
+  }, [densityIndex])
 
   // Reabrir a janela para outro perfil emite o novo sourceId.
   useEffect(() => {
@@ -180,6 +229,63 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
 
   const totalMedia = gallery?.posts.reduce((sum, post) => sum + post.files.length, 0) ?? 0
   const activeItem = lightboxIndex !== undefined ? flatItems[lightboxIndex] : undefined
+  const gridStyle = { '--pv-thumb-min': `${DENSITY_STEPS[densityIndex]}px` } as CSSProperties
+
+  const renderCard = (post: MediaGalleryPost, key: string) => {
+    const thumb = post.files[0]
+    if (!thumb) return null
+    const posterSrc = post.posterPath ?? (isVideo(thumb.mediaType) ? undefined : thumb.absolutePath)
+    const video = isVideo(post.mediaType === 'video' ? 'video' : thumb.mediaType)
+    return (
+      <article className="profile-view-card" key={key}>
+        <button
+          className="profile-view-thumb"
+          onClick={() => openLightboxForPost(post)}
+          type="button"
+          title="Open preview"
+        >
+          {posterSrc ? (
+            <img src={convertFileSrc(posterSrc)} alt="" loading="lazy" />
+          ) : (
+            <video src={convertFileSrc(thumb.absolutePath)} preload="metadata" muted />
+          )}
+          {video ? <span className="profile-view-play" aria-hidden="true">▶</span> : null}
+          {post.mediaType === 'slideshow' ? (
+            <span className="profile-view-badge" aria-hidden="true">▣ {post.files.length}</span>
+          ) : null}
+          {post.section !== 'timeline' ? (
+            <span className="profile-view-section" aria-hidden="true">{post.section}</span>
+          ) : null}
+          <span className="profile-view-thumb-overlay" aria-hidden="true">
+            {post.capturedAt
+              ? new Date(post.capturedAt * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+              : ''}
+          </span>
+        </button>
+        <div className="profile-view-card-actions">
+          <button
+            className="ghost-button queue-icon-button"
+            disabled={!post.postUrl && !gallery?.profileUrl}
+            onClick={() => handleOpenOnline(post, gallery?.profileUrl)}
+            type="button"
+            title={post.postUrl ? 'Open original post online' : 'Original link unavailable — open profile'}
+          >
+            Online
+          </button>
+          <button
+            className="ghost-button queue-icon-button"
+            onClick={() => void revealMediaInFolder(thumb.absolutePath)}
+            type="button"
+            title="Reveal in folder"
+          >
+            Folder
+          </button>
+        </div>
+      </article>
+    )
+  }
+
+  const hasMedia = !!gallery && gallery.posts.length > 0
 
   return (
     <div className="profile-view-shell">
@@ -215,12 +321,63 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         ) : null}
       </header>
 
+      {hasMedia ? (
+        <div className="profile-view-toolbar">
+          <div className="profile-view-segmented" role="group" aria-label="View mode">
+            <button
+              className={viewMode === 'day' ? 'is-active' : ''}
+              onClick={() => setViewMode('day')}
+              type="button"
+              aria-pressed={viewMode === 'day'}
+            >
+              By day
+            </button>
+            <button
+              className={viewMode === 'grid' ? 'is-active' : ''}
+              onClick={() => setViewMode('grid')}
+              type="button"
+              aria-pressed={viewMode === 'grid'}
+            >
+              All media
+            </button>
+          </div>
+          <div className="profile-view-density" role="group" aria-label="Thumbnail size">
+            <button
+              className="ghost-button queue-icon-button"
+              onClick={() => setDensityIndex((index) => Math.max(0, index - 1))}
+              disabled={densityIndex <= 0}
+              type="button"
+              aria-label="Smaller thumbnails"
+              title="Smaller thumbnails (more per row)"
+            >
+              −
+            </button>
+            <button
+              className="ghost-button queue-icon-button"
+              onClick={() => setDensityIndex((index) => Math.min(DENSITY_STEPS.length - 1, index + 1))}
+              disabled={densityIndex >= DENSITY_STEPS.length - 1}
+              type="button"
+              aria-label="Larger thumbnails"
+              title="Larger thumbnails (fewer per row)"
+            >
+              +
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {error ? <div className="runtime-log-window-error">{error}</div> : null}
 
       {loading && !gallery ? (
         <div className="runtime-log-window-empty">Loading media…</div>
       ) : gallery && gallery.posts.length === 0 ? (
         <div className="runtime-log-window-empty">No downloaded media found for this profile.</div>
+      ) : viewMode === 'grid' ? (
+        <div className="profile-view-days">
+          <div className="profile-view-grid" style={gridStyle}>
+            {gallery?.posts.map((post, index) => renderCard(post, post.postId ?? `post-${index}`))}
+          </div>
+        </div>
       ) : (
         <div className="profile-view-days">
           {days.map((day) => (
@@ -229,60 +386,8 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                 <span className="eyebrow">{day.label}</span>
                 <span className="pill">{day.posts.length}</span>
               </div>
-              <div className="profile-view-grid">
-                {day.posts.map((post, index) => {
-                  const thumb = post.files[0]
-                  if (!thumb) return null
-                  const posterSrc = post.posterPath ?? (isVideo(thumb.mediaType) ? undefined : thumb.absolutePath)
-                  const video = isVideo(post.mediaType === 'video' ? 'video' : thumb.mediaType)
-                  return (
-                    <article className="profile-view-card" key={post.postId ?? `${day.key}-${index}`}>
-                      <button
-                        className="profile-view-thumb"
-                        onClick={() => openLightboxForPost(post)}
-                        type="button"
-                        title="Open preview"
-                      >
-                        {posterSrc ? (
-                          <img src={convertFileSrc(posterSrc)} alt="" loading="lazy" />
-                        ) : (
-                          <video src={convertFileSrc(thumb.absolutePath)} preload="metadata" muted />
-                        )}
-                        {video ? <span className="profile-view-play" aria-hidden="true">▶</span> : null}
-                        {post.mediaType === 'slideshow' ? (
-                          <span className="profile-view-badge" aria-hidden="true">▣ {post.files.length}</span>
-                        ) : null}
-                        {post.section !== 'timeline' ? (
-                          <span className="profile-view-section" aria-hidden="true">{post.section}</span>
-                        ) : null}
-                        <span className="profile-view-thumb-overlay" aria-hidden="true">
-                          {post.capturedAt
-                            ? new Date(post.capturedAt * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-                            : ''}
-                        </span>
-                      </button>
-                      <div className="profile-view-card-actions">
-                        <button
-                          className="ghost-button queue-icon-button"
-                          disabled={!post.postUrl && !gallery?.profileUrl}
-                          onClick={() => handleOpenOnline(post, gallery?.profileUrl)}
-                          type="button"
-                          title={post.postUrl ? 'Open original post online' : 'Original link unavailable — open profile'}
-                        >
-                          Online
-                        </button>
-                        <button
-                          className="ghost-button queue-icon-button"
-                          onClick={() => void revealMediaInFolder(thumb.absolutePath)}
-                          type="button"
-                          title="Reveal in folder"
-                        >
-                          Folder
-                        </button>
-                      </div>
-                    </article>
-                  )
-                })}
+              <div className="profile-view-grid" style={gridStyle}>
+                {day.posts.map((post, index) => renderCard(post, post.postId ?? `${day.key}-${index}`))}
               </div>
             </section>
           ))}
