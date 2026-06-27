@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.vscode/
+.DS_Store
+src-tauri/target/
+src-tauri/gen/
+Temp/
+.claude/settings.local.json
+.codex/skills/*/.git/
+connectors/bootstrap/**/*.exe
+connectors/bootstrap/**/*.zip
+connectors/bootstrap/**/*.exe
+connectors/bootstrap/**/*.zip
+connectors/bootstrap/**/*.bin
+connectors/bootstrap/**/*.sig
+__pycache__/
+*.pyc
