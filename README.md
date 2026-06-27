@@ -123,6 +123,30 @@ src-tauri\target\release\bundle\
 
 Use `-PortableOnly` with the build wrapper when installers are not required.
 
+## Continuous integration and releases
+
+GitHub Actions runs lint, frontend tests, a production dependency audit, and a Windows Release build for pull requests and changes to `main` or `develop`.
+
+Releases are tag-driven:
+
+1. Update the version in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`.
+2. Merge the version change into `main`.
+3. Create and push a tag using the `vX.Y.Z` format.
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow validates that all three project versions match the tag, performs the complete Release build and smoke test, and publishes:
+
+- A portable Windows ZIP with the managed connector runtimes.
+- An MSI installer.
+- An NSIS setup executable.
+- SHA-256 checksums for every downloadable asset.
+
+Versions below `1.0.0` are published as GitHub prereleases. An existing tag can be republished manually from the **Release** workflow if an earlier run failed before creating the GitHub Release.
+
 ## Local data
 
 By default, application data is stored under:
