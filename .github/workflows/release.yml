@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish (for example, v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Validate release version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Release tag '$env:RELEASE_TAG' must use the vX.Y.Z format."
+          }
+
+          $version = $Matches.version
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoVersion = (
+            Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' |
+              Select-Object -First 1
+          ).Matches[0].Groups[1].Value
+
+          $versions = @{
+            'package.json' = $packageVersion
+            'src-tauri/tauri.conf.json' = $tauriVersion
+            'src-tauri/Cargo.toml' = $cargoVersion
+          }
+          foreach ($entry in $versions.GetEnumerator()) {
+            if ($entry.Value -ne $version) {
+              throw "$($entry.Key) has version '$($entry.Value)', expected '$version'."
+            }
+          }
+
+          "tag=$env:RELEASE_TAG" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "prerelease=$($version.StartsWith('0.'))" >> $env:GITHUB_OUTPUT
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: release-windows-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            release-windows-cargo-
+            windows-cargo-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Release
+        shell: pwsh
+        run: >
+          powershell -ExecutionPolicy Bypass
+          -File Tools\Build-NinjaCrawler.ps1
+          -Configuration Release
+
+      - name: Smoke test executable
+        shell: pwsh
+        run: >
+          powershell -ExecutionPolicy Bypass
+          -File Tools\SmokeTest-NinjaCrawler.ps1
+          -Configuration Release
+
+      - name: Package release assets
+        shell: pwsh
+        run: >
+          powershell -ExecutionPolicy Bypass
+          -File Tools\Package-NinjaCrawlerRelease.ps1
+          -Version ${{ steps.version.outputs.version }}
+
+      - name: Generate changelog
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass `
+            -File Tools\New-NinjaCrawlerChangelog.ps1 `
+            -Version "${{ steps.version.outputs.version }}" `
+            -CurrentRef "${{ steps.version.outputs.tag }}" `
+            -CurrentTag "${{ steps.version.outputs.tag }}" `
+            -Repository "${{ github.repository }}" `
+            -OutputPath "release\CHANGELOG.md"
+
+      - name: Upload release build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: NinjaCrawler-${{ steps.version.outputs.version }}-windows-x64
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          IS_PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          $assets = @(Get-ChildItem release -File | ForEach-Object FullName)
+          if ($assets.Count -eq 0) {
+            throw "No release assets were generated."
+          }
+
+          & gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            & gh release edit $env:RELEASE_TAG `
+              --title "NinjaCrawler $env:RELEASE_VERSION" `
+              --notes-file release\CHANGELOG.md
+            if ($LASTEXITCODE -ne 0) {
+              throw "GitHub Release notes update failed."
+            }
+            & gh release upload $env:RELEASE_TAG @assets --clobber
+          } else {
+            $arguments = @(
+              'release', 'create', $env:RELEASE_TAG
+              '--verify-tag'
+              '--notes-file', 'release\CHANGELOG.md'
+              '--title', "NinjaCrawler $env:RELEASE_VERSION"
+            )
+            if ($env:IS_PRERELEASE -eq 'True') {
+              $arguments += '--prerelease'
+            }
+            $arguments += $assets
+            & gh @arguments
+          }
+          if ($LASTEXITCODE -ne 0) {
+            throw "GitHub Release publication failed."
+          }
