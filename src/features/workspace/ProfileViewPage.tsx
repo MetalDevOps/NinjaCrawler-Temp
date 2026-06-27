@@ -1,0 +1,350 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { convertFileSrc } from '@tauri-apps/api/core'
+import {
+  loadSourceMediaGallery,
+  loadWorkspaceSnapshot,
+  openExternalTarget,
+  openMediaFile,
+  revealMediaInFolder,
+  subscribeToProfileViewSource,
+} from '../../bridge/desktop'
+import { DEFAULT_PROVIDER_CATALOG } from '../../domain/defaults'
+import type { MediaGalleryPost, ProviderKey, SourceMediaGallery } from '../../domain/models'
+
+interface ProfileViewPageProps {
+  initialSourceId?: string
+}
+
+interface FlatItem {
+  file: { relativePath: string; absolutePath: string; mediaType: string }
+  post: MediaGalleryPost
+  /** índice da imagem dentro do post (slideshow) */
+  fileIndex: number
+}
+
+interface DayGroup {
+  key: string
+  label: string
+  posts: MediaGalleryPost[]
+}
+
+function providerDisplayName(provider: ProviderKey): string {
+  return DEFAULT_PROVIDER_CATALOG.find((entry) => entry.key === provider)?.displayName ?? provider
+}
+
+function dayKey(capturedAt?: number): string {
+  if (!capturedAt) return 'unknown'
+  return new Date(capturedAt * 1000).toISOString().slice(0, 10)
+}
+
+function dayLabel(key: string, capturedAt?: number): string {
+  if (key === 'unknown' || !capturedAt) return 'Date unknown'
+  return new Date(capturedAt * 1000).toLocaleDateString(undefined, {
+    weekday: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+function isVideo(mediaType: string): boolean {
+  return mediaType === 'video'
+}
+
+export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
+  const [sourceId, setSourceId] = useState<string | undefined>(initialSourceId)
+  const [gallery, setGallery] = useState<SourceMediaGallery>()
+  const [avatarPath, setAvatarPath] = useState<string>()
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string>()
+  const [lightboxIndex, setLightboxIndex] = useState<number>()
+
+  // Reabrir a janela para outro perfil emite o novo sourceId.
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined
+    void subscribeToProfileViewSource((nextSourceId) => setSourceId(nextSourceId))
+      .then((teardown) => {
+        unsubscribe = teardown
+      })
+      .catch(() => undefined)
+    return () => unsubscribe?.()
+  }, [])
+
+  const load = useCallback(async (id: string) => {
+    setLoading(true)
+    setError(undefined)
+    try {
+      const [nextGallery, snapshot] = await Promise.all([
+        loadSourceMediaGallery(id),
+        loadWorkspaceSnapshot().catch(() => undefined),
+      ])
+      setGallery(nextGallery)
+      const source = snapshot?.sources.find((entry) => entry.id === id)
+      setAvatarPath(source?.profileImagePath)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Failed to load profile media.')
+      setGallery(undefined)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (sourceId) {
+      void load(sourceId)
+    }
+  }, [sourceId, load])
+
+  const days = useMemo<DayGroup[]>(() => {
+    if (!gallery) return []
+    const groups: DayGroup[] = []
+    let current: DayGroup | undefined
+    for (const post of gallery.posts) {
+      const key = dayKey(post.capturedAt)
+      if (!current || current.key !== key) {
+        current = { key, label: dayLabel(key, post.capturedAt), posts: [] }
+        groups.push(current)
+      }
+      current.posts.push(post)
+    }
+    return groups
+  }, [gallery])
+
+  // Lista plana (post → cada arquivo) para o lightbox navegar.
+  const flatItems = useMemo<FlatItem[]>(() => {
+    if (!gallery) return []
+    const items: FlatItem[] = []
+    for (const post of gallery.posts) {
+      post.files.forEach((file, fileIndex) => items.push({ file, post, fileIndex }))
+    }
+    return items
+  }, [gallery])
+
+  const firstFlatIndexByPost = useMemo(() => {
+    const map = new Map<MediaGalleryPost, number>()
+    flatItems.forEach((item, index) => {
+      if (item.fileIndex === 0) {
+        map.set(item.post, index)
+      }
+    })
+    return map
+  }, [flatItems])
+
+  const openLightboxForPost = useCallback(
+    (post: MediaGalleryPost) => {
+      const index = firstFlatIndexByPost.get(post)
+      if (index !== undefined) {
+        setLightboxIndex(index)
+      }
+    },
+    [firstFlatIndexByPost],
+  )
+
+  const closeLightbox = useCallback(() => setLightboxIndex(undefined), [])
+  const stepLightbox = useCallback(
+    (delta: number) => {
+      setLightboxIndex((current) => {
+        if (current === undefined) return current
+        const next = current + delta
+        if (next < 0 || next >= flatItems.length) return current
+        return next
+      })
+    },
+    [flatItems.length],
+  )
+
+  // Teclado no lightbox (captura para ter prioridade sobre o Escape global).
+  const lightboxOpen = lightboxIndex !== undefined
+  const lightboxOpenRef = useRef(lightboxOpen)
+  lightboxOpenRef.current = lightboxOpen
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (!lightboxOpenRef.current) return
+      if (event.key === 'Escape') {
+        event.stopImmediatePropagation()
+        closeLightbox()
+      } else if (event.key === 'ArrowLeft') {
+        stepLightbox(-1)
+      } else if (event.key === 'ArrowRight') {
+        stepLightbox(1)
+      }
+    }
+    document.addEventListener('keydown', handler, true)
+    return () => document.removeEventListener('keydown', handler, true)
+  }, [closeLightbox, stepLightbox])
+
+  const handleOpenOnline = useCallback((post: MediaGalleryPost, fallbackUrl?: string) => {
+    const url = post.postUrl ?? fallbackUrl
+    if (url) void openExternalTarget(url)
+  }, [])
+
+  const totalMedia = gallery?.posts.reduce((sum, post) => sum + post.files.length, 0) ?? 0
+  const activeItem = lightboxIndex !== undefined ? flatItems[lightboxIndex] : undefined
+
+  return (
+    <div className="profile-view-shell">
+      <header className="profile-view-header">
+        <span className="profile-view-avatar" aria-hidden="true">
+          {avatarPath ? (
+            <img src={convertFileSrc(avatarPath)} alt="" />
+          ) : (
+            <span className="profile-view-avatar-fallback">
+              {(gallery?.handle ?? '?').replace(/^@/, '').charAt(0).toUpperCase() || '?'}
+            </span>
+          )}
+        </span>
+        <div className="profile-view-identity">
+          <h1>{gallery?.handle ?? '…'}</h1>
+          <p className="profile-view-meta">
+            {gallery ? (
+              <>
+                <span className={`queue-provider-pill provider-${gallery.provider}`}>
+                  {providerDisplayName(gallery.provider)}
+                </span>
+                <span className="muted-text">
+                  {gallery.posts.length} post{gallery.posts.length === 1 ? '' : 's'} · {totalMedia} file{totalMedia === 1 ? '' : 's'}
+                </span>
+              </>
+            ) : null}
+          </p>
+        </div>
+        {gallery?.profileUrl ? (
+          <button className="ghost-button" onClick={() => void openExternalTarget(gallery.profileUrl)} type="button">
+            Open profile online
+          </button>
+        ) : null}
+      </header>
+
+      {error ? <div className="runtime-log-window-error">{error}</div> : null}
+
+      {loading && !gallery ? (
+        <div className="runtime-log-window-empty">Loading media…</div>
+      ) : gallery && gallery.posts.length === 0 ? (
+        <div className="runtime-log-window-empty">No downloaded media found for this profile.</div>
+      ) : (
+        <div className="profile-view-days">
+          {days.map((day) => (
+            <section className="profile-view-day" key={day.key}>
+              <div className="profile-view-day-header">
+                <span className="eyebrow">{day.label}</span>
+                <span className="pill">{day.posts.length}</span>
+              </div>
+              <div className="profile-view-grid">
+                {day.posts.map((post, index) => {
+                  const thumb = post.files[0]
+                  if (!thumb) return null
+                  const posterSrc = post.posterPath ?? (isVideo(thumb.mediaType) ? undefined : thumb.absolutePath)
+                  const video = isVideo(post.mediaType === 'video' ? 'video' : thumb.mediaType)
+                  return (
+                    <article className="profile-view-card" key={post.postId ?? `${day.key}-${index}`}>
+                      <button
+                        className="profile-view-thumb"
+                        onClick={() => openLightboxForPost(post)}
+                        type="button"
+                        title="Open preview"
+                      >
+                        {posterSrc ? (
+                          <img src={convertFileSrc(posterSrc)} alt="" loading="lazy" />
+                        ) : (
+                          <video src={convertFileSrc(thumb.absolutePath)} preload="metadata" muted />
+                        )}
+                        {video ? <span className="profile-view-play" aria-hidden="true">▶</span> : null}
+                        {post.mediaType === 'slideshow' ? (
+                          <span className="profile-view-badge" aria-hidden="true">▣ {post.files.length}</span>
+                        ) : null}
+                        {post.section !== 'timeline' ? (
+                          <span className="profile-view-section" aria-hidden="true">{post.section}</span>
+                        ) : null}
+                        <span className="profile-view-thumb-overlay" aria-hidden="true">
+                          {post.capturedAt
+                            ? new Date(post.capturedAt * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+                            : ''}
+                        </span>
+                      </button>
+                      <div className="profile-view-card-actions">
+                        <button
+                          className="ghost-button queue-icon-button"
+                          disabled={!post.postUrl && !gallery?.profileUrl}
+                          onClick={() => handleOpenOnline(post, gallery?.profileUrl)}
+                          type="button"
+                          title={post.postUrl ? 'Open original post online' : 'Original link unavailable — open profile'}
+                        >
+                          Online
+                        </button>
+                        <button
+                          className="ghost-button queue-icon-button"
+                          onClick={() => void revealMediaInFolder(thumb.absolutePath)}
+                          type="button"
+                          title="Reveal in folder"
+                        >
+                          Folder
+                        </button>
+                      </div>
+                    </article>
+                  )
+                })}
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
+
+      {activeItem ? (
+        <div className="profile-view-lightbox" role="dialog" aria-modal="true" onClick={closeLightbox}>
+          <button className="profile-view-lightbox-close" onClick={closeLightbox} type="button" aria-label="Close">
+            ✕
+          </button>
+          {lightboxIndex! > 0 ? (
+            <button
+              className="profile-view-lightbox-nav prev"
+              onClick={(event) => {
+                event.stopPropagation()
+                stepLightbox(-1)
+              }}
+              type="button"
+              aria-label="Previous"
+            >
+              ◀
+            </button>
+          ) : null}
+          <div className="profile-view-lightbox-stage" onClick={(event) => event.stopPropagation()}>
+            {isVideo(activeItem.file.mediaType) ? (
+              <video src={convertFileSrc(activeItem.file.absolutePath)} controls autoPlay />
+            ) : (
+              <img src={convertFileSrc(activeItem.file.absolutePath)} alt="" />
+            )}
+            <div className="profile-view-lightbox-actions">
+              <button
+                className="ghost-button"
+                disabled={!activeItem.post.postUrl && !gallery?.profileUrl}
+                onClick={() => handleOpenOnline(activeItem.post, gallery?.profileUrl)}
+                type="button"
+              >
+                Open online
+              </button>
+              <button className="ghost-button" onClick={() => void openMediaFile(activeItem.file.absolutePath)} type="button">
+                Open file
+              </button>
+              <button className="ghost-button" onClick={() => void revealMediaInFolder(activeItem.file.absolutePath)} type="button">
+                Reveal in folder
+              </button>
+            </div>
+          </div>
+          {lightboxIndex! < flatItems.length - 1 ? (
+            <button
+              className="profile-view-lightbox-nav next"
+              onClick={(event) => {
+                event.stopPropagation()
+                stepLightbox(1)
+              }}
+              type="button"
+              aria-label="Next"
+            >
+              ▶
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
