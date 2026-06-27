@@ -1,0 +1,42 @@
+{
+  "connectors": [
+    {
+      "key": "gallery-dl",
+      "displayName": "gallery-dl",
+      "toolSettingKey": "tool.gallery-dl.path",
+      "defaultCommand": "gallery-dl",
+      "bundledVersion": "1.31.9",
+      "releaseTag": "v1.31.9",
+      "executableName": "gallery-dl.exe",
+      "versionArgs": ["--version"],
+      "releaseApiUrl": "https://api.github.com/repos/mikf/gallery-dl/releases",
+      "assetName": "gallery-dl.exe"
+    },
+    {
+      "key": "yt-dlp",
+      "displayName": "yt-dlp",
+      "toolSettingKey": "tool.yt-dlp.path",
+      "defaultCommand": "yt-dlp",
+      "bundledVersion": "2026.03.03",
+      "executableName": "yt-dlp.exe",
+      "versionArgs": ["--version"],
+      "releaseApiUrl": "https://api.github.com/repos/yt-dlp/yt-dlp/releases",
+      "assetName": "yt-dlp.exe"
+    },
+    {
+      "key": "instaloader",
+      "displayName": "Instaloader",
+      "toolSettingKey": "tool.instaloader.path",
+      "defaultCommand": "instaloader",
+      "bundledVersion": "4.15",
+      "releaseTag": "v4.15",
+      "executableName": "instaloader.exe",
+      "versionArgs": ["--version"],
+      "releaseApiUrl": "https://api.github.com/repos/instaloader/instaloader/releases",
+      "assetName": "instaloader-windows-standalone.zip",
+      "assetPrefix": "instaloader-",
+      "assetSuffix": "-windows-standalone.zip",
+      "archiveMemberName": "instaloader.exe"
+    }
+  ]
+}
