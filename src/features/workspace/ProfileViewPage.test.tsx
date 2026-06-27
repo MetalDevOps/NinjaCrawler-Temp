@@ -53,6 +53,7 @@ function galleryFixture(): SourceMediaGallery {
 
 describe('ProfileViewPage', () => {
   beforeEach(() => {
+    localStorage.clear()
     for (const mock of Object.values(bridgeMocks)) {
       mock.mockReset()
     }
@@ -83,6 +84,38 @@ describe('ProfileViewPage', () => {
         'https://www.tiktok.com/@gaaby.tls/video/7624199329925958920',
       )
     })
+  })
+
+  it('switches to the "all media" grid and persists the choice', async () => {
+    const { unmount } = render(<ProfileViewPage initialSourceId="src-1" />)
+
+    // Default mode is grouped by day.
+    expect(await screen.findByRole('button', { name: /by day/i })).toHaveProperty('ariaPressed', 'true')
+
+    fireEvent.click(screen.getByRole('button', { name: /all media/i }))
+
+    // Grid mode is active, both posts still rendered, choice persisted.
+    expect(screen.getByRole('button', { name: /all media/i })).toHaveProperty('ariaPressed', 'true')
+    expect(screen.getByRole('button', { name: /by day/i })).toHaveProperty('ariaPressed', 'false')
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2)
+    expect(localStorage.getItem('profileView.mode')).toBe('grid')
+
+    // Re-mounting restores the saved mode.
+    unmount()
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    expect(await screen.findByRole('button', { name: /all media/i })).toHaveProperty('ariaPressed', 'true')
+  })
+
+  it('adjusts and persists the thumbnail density', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findAllByRole('button', { name: /open preview/i })
+
+    fireEvent.click(screen.getByRole('button', { name: /larger thumbnails/i }))
+    expect(localStorage.getItem('profileView.density')).toBe('3')
+
+    fireEvent.click(screen.getByRole('button', { name: /smaller thumbnails/i }))
+    fireEvent.click(screen.getByRole('button', { name: /smaller thumbnails/i }))
+    expect(localStorage.getItem('profileView.density')).toBe('1')
   })
 
   it('opens the lightbox when a thumbnail is clicked', async () => {
