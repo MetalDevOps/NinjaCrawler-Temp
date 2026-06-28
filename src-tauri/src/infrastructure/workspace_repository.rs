@@ -2211,11 +2211,15 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     acc.media_type
                 };
                 // O id do ledger (autoridade do connector) tem prioridade sobre o
-                // derivado do nome; o shortcode do IG só vem do ledger.
-                let post_id_for_url = acc
-                    .ledger_post_key
-                    .as_deref()
-                    .or(acc.post_id.as_deref());
+                // derivado do nome; o shortcode do IG só vem do ledger. No Twitter
+                // o nome do arquivo NUNCA carrega o status id (só o media key/
+                // autonumber), então usar o id derivado do nome geraria um link
+                // ERRADO — ali só o status id real (ledger/XML) vale.
+                let post_id_for_url = if provider.eq_ignore_ascii_case("twitter") {
+                    acc.ledger_post_key.as_deref()
+                } else {
+                    acc.ledger_post_key.as_deref().or(acc.post_id.as_deref())
+                };
                 let post_url = build_post_url(
                     &provider,
                     &handle,
@@ -6130,6 +6134,15 @@ fn execute_twitter_source_sync_with_connection(
                 &result.downloaded_media,
                 &finished_at,
             )?;
+            // Preenche o post key na mídia já no disco (baixada antes de o key ser
+            // gravado): casa pelo provider_media_key, só onde está vazio.
+            backfill_provider_sync_media_ledger_post_keys(
+                connection,
+                "twitter",
+                &context.source.id,
+                &result.media_post_links,
+                &finished_at,
+            )?;
 
             // Persiste o user id resolvido para detectar renames/duplicatas depois.
             if let Some(user_id) = result.resolved_user_id.as_deref() {
@@ -6809,6 +6822,47 @@ fn upsert_provider_sync_media_ledger_entries(
                     relative_path,
                     media.provider_post_key,
                     media.captured_at_timestamp,
+                    timestamp,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Fills `provider_post_key` (and `captured_at`) on media ledger rows that are
+/// already on disk but lack the post key — paired by `provider_media_key` from
+/// the freshly fetched timeline. UPDATE-only: never inserts and never overwrites
+/// a key that is already set, so it is safe to run on every sync.
+fn backfill_provider_sync_media_ledger_post_keys(
+    connection: &Connection,
+    provider: &str,
+    source_id: &str,
+    links: &[twitter_connector::TwitterMediaPostLink],
+    timestamp: &str,
+) -> Result<(), String> {
+    for link in links {
+        let media_key = link.provider_media_key.trim();
+        let post_key = link.provider_post_key.trim();
+        if media_key.is_empty() || post_key.is_empty() {
+            continue;
+        }
+        connection
+            .execute(
+                "UPDATE provider_sync_media_ledger
+                 SET provider_post_key = ?4,
+                     captured_at = COALESCE(captured_at, ?5),
+                     last_seen_at = ?6
+                 WHERE provider = ?1
+                   AND source_id = ?2
+                   AND provider_media_key = ?3
+                   AND (provider_post_key IS NULL OR provider_post_key = '')",
+                params![
+                    provider,
+                    source_id,
+                    media_key.to_ascii_lowercase(),
+                    post_key,
+                    link.captured_at_timestamp,
                     timestamp,
                 ],
             )
@@ -14583,6 +14637,58 @@ mod tests {
         );
         // Sem id não há link.
         assert_eq!(build_post_url("twitter", "someone", None, false, None), None);
+    }
+
+    #[test]
+    fn backfill_twitter_post_keys_fills_only_missing() {
+        let conn = rusqlite::Connection::open_in_memory().expect("db");
+        conn.execute_batch(
+            "CREATE TABLE provider_sync_media_ledger (
+                provider TEXT, source_id TEXT, account_id TEXT, source_handle TEXT,
+                provider_media_key TEXT, media_type TEXT, media_section TEXT, relative_path TEXT,
+                provider_post_key TEXT, captured_at INTEGER, first_seen_at TEXT, last_seen_at TEXT,
+                PRIMARY KEY (provider, source_id, provider_media_key, media_type));
+             INSERT INTO provider_sync_media_ledger VALUES
+                ('twitter','s1','a','h','2068','image','media','2026 x.jpg', NULL, NULL, 't0','t0'),
+                ('twitter','s1','a','h','9999','image','media','y.jpg', 'KEEP', NULL, 't0','t0');",
+        )
+        .expect("seed");
+
+        let links = vec![
+            twitter_connector::TwitterMediaPostLink {
+                provider_media_key: "2068".into(),
+                provider_post_key: "111".into(),
+                media_section: "media".into(),
+                captured_at_timestamp: Some(123),
+            },
+            twitter_connector::TwitterMediaPostLink {
+                provider_media_key: "9999".into(),
+                provider_post_key: "222".into(),
+                media_section: "media".into(),
+                captured_at_timestamp: Some(456),
+            },
+        ];
+        backfill_provider_sync_media_ledger_post_keys(&conn, "twitter", "s1", &links, "t1")
+            .expect("backfill");
+
+        // Missing key gets filled (with captured_at); existing key is preserved.
+        let filled: (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT provider_post_key, captured_at FROM provider_sync_media_ledger WHERE provider_media_key='2068'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(filled.0.as_deref(), Some("111"));
+        assert_eq!(filled.1, Some(123));
+        let kept: Option<String> = conn
+            .query_row(
+                "SELECT provider_post_key FROM provider_sync_media_ledger WHERE provider_media_key='9999'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some("KEEP"));
     }
 
     #[test]
