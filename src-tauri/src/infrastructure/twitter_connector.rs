@@ -84,6 +84,17 @@ pub struct ObservedTwitterPost {
     pub media_section: String,
 }
 
+/// Media→post link observed in the fetched timeline, used to backfill the post
+/// key on media that is already on disk (downloaded before the key was stored).
+/// Captured for every observed tweet, including ones skipped from download.
+#[derive(Clone)]
+pub struct TwitterMediaPostLink {
+    pub provider_media_key: String,
+    pub provider_post_key: String,
+    pub media_section: String,
+    pub captured_at_timestamp: Option<i64>,
+}
+
 #[derive(Clone)]
 pub struct DownloadedTwitterMedia {
     pub file_path: PathBuf,
@@ -109,6 +120,9 @@ pub struct TwitterManifestSummary {
 pub struct TwitterConnectorResult {
     pub observed_posts: Vec<ObservedTwitterPost>,
     pub downloaded_media: Vec<DownloadedTwitterMedia>,
+    /// Media→post links from the fetched timeline (for backfilling the post key
+    /// on already-downloaded media). Includes posts skipped from download.
+    pub media_post_links: Vec<TwitterMediaPostLink>,
     pub section_errors: Vec<String>,
     pub rate_limited: bool,
     /// O sync interrompeu modelos restantes por limite (AbortOnLimit).
@@ -228,6 +242,7 @@ where
     let mut rate_limited = false;
     let mut limit_aborted = false;
     let mut observed_posts: Vec<ObservedTwitterPost> = Vec::new();
+    let mut media_post_links: Vec<TwitterMediaPostLink> = Vec::new();
     let mut planned_downloads: Vec<DownloadPlanEntry> = Vec::new();
     let mut seen_post_keys: HashSet<String> = HashSet::new();
     let mut seen_media_keys: HashSet<String> = HashSet::new();
@@ -337,6 +352,17 @@ where
             summary.normalized_post_count += 1;
             if !seen_post_keys.insert(tweet.post_key.clone()) {
                 continue;
+            }
+            // Vínculo media→post de TODO tweet visto (inclusive os pulados abaixo):
+            // permite preencher o post key na mídia já no disco, baixada antes de
+            // o key ser persistido. Usa só os dados já buscados (sem download).
+            for asset in &tweet.assets {
+                media_post_links.push(TwitterMediaPostLink {
+                    provider_media_key: asset.provider_media_key.clone(),
+                    provider_post_key: tweet.post_key.clone(),
+                    media_section: run.media_section.to_string(),
+                    captured_at_timestamp: tweet.captured_at_timestamp,
+                });
             }
             // Post já baixado (no ledger) = pula todos os seus assets, como o
             // SCrawler faz com o _Posts.txt. Tentar deduplicar por nome de
@@ -492,6 +518,7 @@ where
     Ok(TwitterConnectorResult {
         observed_posts,
         downloaded_media,
+        media_post_links,
         section_errors,
         rate_limited,
         limit_aborted,
