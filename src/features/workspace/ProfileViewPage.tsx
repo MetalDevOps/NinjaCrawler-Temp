@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import {
+  deleteSourceMedia,
   loadSourceMediaGallery,
   loadWorkspaceSnapshot,
   openExternalTarget,
@@ -82,6 +83,11 @@ function isVideo(mediaType: string): boolean {
   return mediaType === 'video'
 }
 
+/** Identificador estável de um post para seleção (o 1º arquivo é único por post). */
+function postKey(post: MediaGalleryPost): string {
+  return post.files[0]?.relativePath ?? post.postId ?? ''
+}
+
 const SECTION_FILTER_ALL = 'all'
 
 /** Ordem estável dos chips de seção (feed antes de reels etc.). */
@@ -135,6 +141,10 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [densityIndex, setDensityIndex] = useState<number>(readStoredDensity)
   const [sectionFilter, setSectionFilter] = useState<string>(SECTION_FILTER_ALL)
   const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT)
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set())
+  const [confirmPosts, setConfirmPosts] = useState<MediaGalleryPost[]>()
+  const [deleting, setDeleting] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
 
@@ -325,6 +335,49 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     if (url) void openExternalTarget(url)
   }, [])
 
+  // Sai do modo seleção / limpa ao trocar de perfil ou de filtro.
+  useEffect(() => {
+    setSelectMode(false)
+    setSelectedKeys(new Set())
+  }, [sourceId, sectionFilter])
+
+  const toggleSelected = useCallback((post: MediaGalleryPost) => {
+    setSelectedKeys((current) => {
+      const next = new Set(current)
+      const key = postKey(post)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
+
+  const exitSelectMode = useCallback(() => {
+    setSelectMode(false)
+    setSelectedKeys(new Set())
+  }, [])
+
+  const selectedPosts = useMemo(
+    () => visiblePosts.filter((post) => selectedKeys.has(postKey(post))),
+    [visiblePosts, selectedKeys],
+  )
+
+  const performDelete = useCallback(async () => {
+    if (!sourceId || !confirmPosts || confirmPosts.length === 0) return
+    const relativePaths = confirmPosts.flatMap((post) => post.files.map((file) => file.relativePath))
+    setDeleting(true)
+    setError(undefined)
+    try {
+      const next = await deleteSourceMedia(sourceId, relativePaths)
+      setGallery(next)
+      setConfirmPosts(undefined)
+      exitSelectMode()
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Failed to delete media.')
+    } finally {
+      setDeleting(false)
+    }
+  }, [sourceId, confirmPosts, exitSelectMode])
+
   const totalMedia = gallery?.posts.reduce((sum, post) => sum + post.files.length, 0) ?? 0
   const activeItem = lightboxIndex !== undefined ? flatItems[lightboxIndex] : undefined
   const gridStyle = { '--pv-thumb-min': `${DENSITY_STEPS[densityIndex]}px` } as CSSProperties
@@ -334,13 +387,24 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     if (!thumb) return null
     const posterSrc = post.posterPath ?? (isVideo(thumb.mediaType) ? undefined : thumb.absolutePath)
     const video = isVideo(post.mediaType === 'video' ? 'video' : thumb.mediaType)
+    const selected = selectedKeys.has(postKey(post))
     return (
-      <article className="profile-view-card" key={key}>
+      <article className={`profile-view-card${selected ? ' is-selected' : ''}`} key={key}>
+        <button
+          className={`profile-view-select${selected ? ' is-checked' : ''}`}
+          onClick={() => toggleSelected(post)}
+          type="button"
+          aria-pressed={selected}
+          aria-label={selected ? 'Deselect media' : 'Select media'}
+          title={selected ? 'Deselect' : 'Select'}
+        >
+          <span aria-hidden="true">{selected ? '✓' : ''}</span>
+        </button>
         <button
           className="profile-view-thumb"
-          onClick={() => openLightboxForPost(post)}
+          onClick={() => (selectMode ? toggleSelected(post) : openLightboxForPost(post))}
           type="button"
-          title="Open preview"
+          title={selectMode ? 'Toggle selection' : 'Open preview'}
         >
           {posterSrc ? (
             <img src={convertFileSrc(posterSrc)} alt="" loading="lazy" />
@@ -379,6 +443,14 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
             title="Reveal in folder"
           >
             Folder
+          </button>
+          <button
+            className="ghost-button queue-icon-button profile-view-delete"
+            onClick={() => setConfirmPosts([post])}
+            type="button"
+            title="Delete (move to Recycle Bin)"
+          >
+            Delete
           </button>
         </div>
       </article>
@@ -486,6 +558,46 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
               +
             </button>
           </div>
+          <button
+            className={`ghost-button profile-view-select-toggle${selectMode ? ' is-active' : ''}`}
+            onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+            type="button"
+            aria-pressed={selectMode}
+          >
+            {selectMode ? 'Done' : 'Select'}
+          </button>
+        </div>
+      ) : null}
+
+      {selectMode ? (
+        <div className="profile-view-selectbar">
+          <span className="muted-text">
+            {selectedPosts.length} selected
+          </span>
+          <button
+            className="ghost-button queue-icon-button"
+            onClick={() => setSelectedKeys(new Set(visiblePosts.map(postKey)))}
+            type="button"
+            disabled={visiblePosts.length === 0 || selectedPosts.length === visiblePosts.length}
+          >
+            Select all
+          </button>
+          <button
+            className="ghost-button queue-icon-button"
+            onClick={() => setSelectedKeys(new Set())}
+            type="button"
+            disabled={selectedPosts.length === 0}
+          >
+            Clear
+          </button>
+          <button
+            className="ghost-button queue-icon-button profile-view-delete"
+            onClick={() => setConfirmPosts(selectedPosts)}
+            type="button"
+            disabled={selectedPosts.length === 0}
+          >
+            Delete selected
+          </button>
         </div>
       ) : null}
 
@@ -519,6 +631,51 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           ) : null}
         </div>
       )}
+
+      {confirmPosts && confirmPosts.length > 0 ? (
+        <div
+          className="profile-view-lightbox profile-view-confirm"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => (deleting ? undefined : setConfirmPosts(undefined))}
+        >
+          <div className="profile-view-confirm-card" onClick={(event) => event.stopPropagation()}>
+            {(() => {
+              const fileCount = confirmPosts.reduce((sum, post) => sum + post.files.length, 0)
+              return (
+                <>
+                  <h2>Delete media?</h2>
+                  <p>
+                    Move {confirmPosts.length} post{confirmPosts.length === 1 ? '' : 's'}
+                    {' '}({fileCount} file{fileCount === 1 ? '' : 's'}) to the Recycle Bin?
+                  </p>
+                  <p className="muted-text">
+                    They will be marked as deleted so they are not downloaded again.
+                  </p>
+                </>
+              )
+            })()}
+            <div className="profile-view-confirm-actions">
+              <button
+                className="ghost-button"
+                onClick={() => setConfirmPosts(undefined)}
+                type="button"
+                disabled={deleting}
+              >
+                Cancel
+              </button>
+              <button
+                className="ghost-button profile-view-delete"
+                onClick={() => void performDelete()}
+                type="button"
+                disabled={deleting}
+              >
+                {deleting ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {activeItem ? (
         <div className="profile-view-lightbox" role="dialog" aria-modal="true" onClick={closeLightbox}>

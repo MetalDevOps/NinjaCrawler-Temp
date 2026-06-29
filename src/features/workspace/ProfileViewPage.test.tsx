@@ -7,6 +7,7 @@ import { ProfileViewPage } from './ProfileViewPage'
 
 const bridgeMocks = vi.hoisted(() => ({
   loadSourceMediaGallery: vi.fn(),
+  deleteSourceMedia: vi.fn(),
   loadWorkspaceSnapshot: vi.fn(),
   openExternalTarget: vi.fn(),
   openMediaFile: vi.fn(),
@@ -229,5 +230,48 @@ describe('ProfileViewPage', () => {
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByRole('button', { name: /open online/i })).toBeTruthy()
     expect(within(dialog).getByRole('button', { name: /reveal in folder/i })).toBeTruthy()
+  })
+
+  it('multi-selects posts and deletes them via the backend', async () => {
+    // After deletion the backend returns the gallery without the first post.
+    const remaining = galleryFixture()
+    remaining.posts = remaining.posts.slice(1)
+    bridgeMocks.deleteSourceMedia.mockResolvedValue(remaining)
+
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findAllByRole('button', { name: /open preview/i })
+
+    // Enter selection mode and pick the first post.
+    fireEvent.click(screen.getByRole('button', { name: /^select$/i }))
+    fireEvent.click(screen.getAllByRole('button', { name: /select media/i })[0])
+    expect(screen.getByText(/1 selected/i)).toBeTruthy()
+
+    // Delete selected → confirm dialog → confirm.
+    fireEvent.click(screen.getByRole('button', { name: /delete selected/i }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: /^delete$/i }))
+
+    await waitFor(() =>
+      expect(bridgeMocks.deleteSourceMedia).toHaveBeenCalledWith('src-1', ['a.mp4']),
+    )
+    // Gallery refreshed to the backend result (first post gone).
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1),
+    )
+  })
+
+  it('deletes a single post from its card action', async () => {
+    bridgeMocks.deleteSourceMedia.mockResolvedValue({ ...galleryFixture(), posts: [] })
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findAllByRole('button', { name: /open preview/i })
+
+    // Card action delete (accessible name is the visible text "Delete").
+    fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0])
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Delete' }))
+
+    await waitFor(() =>
+      expect(bridgeMocks.deleteSourceMedia).toHaveBeenCalledWith('src-1', ['a.mp4']),
+    )
   })
 })
