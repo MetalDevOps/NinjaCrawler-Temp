@@ -45,6 +45,12 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Test Companion release packaging
+        shell: pwsh
+        run: >
+          pwsh
+          -File Tools/Test-NinjaCrawlerReleasePackaging.ps1
+
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
