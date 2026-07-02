@@ -1477,6 +1477,9 @@ function App() {
           <strong>{queueProgressText}</strong>
         </div>
         <div className="status-cell status-cell-actions">
+          <button className="status-open-queue-button" onClick={() => void handleOpenSingleVideos()} type="button">
+            Single Videos
+          </button>
           <button className="status-open-queue-button" onClick={() => void handleOpenQueueStatus()} type="button">
             Queue Status
           </button>

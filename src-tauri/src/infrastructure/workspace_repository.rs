@@ -3897,22 +3897,6 @@ fn run_yt_dlp_video_download(
     })
 }
 
-/// Baixa um story do TikTok (URL `/video/<id>`) direto na pasta `Stories/` do
-/// perfil rastreado — o mesmo destino usado pelo sync de stories. A galeria do
-/// ProfileView já exibe pelo subfolder.
-pub fn download_tiktok_story_to_source(source: SourceProfile, video_url: String) -> Result<(), String> {
-    with_workspace(|connection, layout| {
-        if !source.provider.eq_ignore_ascii_case("tiktok") {
-            return Err("Story download requires a TikTok source.".to_string());
-        }
-        let profile_root =
-            resolved_source_media_output_root_with_connection(connection, layout, &source)?;
-        let stories_dir = profile_root.join("Stories");
-        run_yt_dlp_video_download(connection, layout, video_url.trim(), "tiktok", &stories_dir)?;
-        Ok(())
-    })
-}
-
 /// Baixa um vídeo avulso por URL (yt-dlp; `--impersonate` para TikTok), salva na
 /// raiz plana "Single videos" e cataloga em `single_videos` (dedup por provider+id).
 pub fn download_single_video(url: String) -> Result<SingleVideo, String> {
@@ -7274,6 +7258,12 @@ fn execute_tiktok_source_sync_with_connection(
             stories: options.get_stories_user.unwrap_or(false),
             reposts: options.get_reposts.unwrap_or(false),
         },
+        target_video_url: options
+            .target_video_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         download_videos: options.download_videos.unwrap_or(true),
         download_photos: options.download_photos.unwrap_or(true),
         separate_video_folder: options.separate_video_folder.unwrap_or(false),

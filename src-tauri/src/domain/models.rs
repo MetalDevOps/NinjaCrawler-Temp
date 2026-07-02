@@ -858,6 +858,10 @@ pub struct TikTokSourceSyncOptions {
     pub get_stories_user: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub get_reposts: Option<bool>,
+    /// Override run-only (captura de story do Companion): baixa apenas este vídeo
+    /// na pasta `Stories/`. Não é persistido nas opções do perfil.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_video_url: Option<String>,
     /// Vídeos baixam via yt-dlp; fotos (posts de slideshow) via gallery-dl.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download_videos: Option<bool>,
@@ -913,6 +917,7 @@ pub struct TikTokSourceSyncOptions {
 pub fn default_tiktok_source_sync_options() -> TikTokSourceSyncOptions {
     TikTokSourceSyncOptions {
         get_timeline: Some(true),
+        target_video_url: None,
         get_stories_user: Some(false),
         get_reposts: Some(false),
         download_videos: Some(true),

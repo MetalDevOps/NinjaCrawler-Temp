@@ -1,7 +1,7 @@
 use crate::domain::models::{
     CompanionAccountCapture, CompanionAccountImportInput, InstagramSourceSyncOptions,
     RunSourceSyncInput, SourceEditorSeedIntent, SourceEditorWindowIntent, SourceProfile,
-    SourceSyncOptions,
+    SourceSyncOptions, TikTokSourceSyncOptions,
 };
 use crate::infrastructure::{desktop_runtime, source_sync_runtime, workspace_repository};
 use serde::{Deserialize, Serialize};
@@ -429,9 +429,31 @@ fn download_target(
         {
             return Err("Selected story does not match the requested source.".to_string());
         }
-        workspace_repository::download_tiktok_story_to_source(source.clone(), url.to_string())?;
+
+        // Enfileira um sync direcionado: baixa só este vídeo na pasta Stories/ do
+        // perfil (usando os cookies da conta), rastreável no Queue Status.
+        let override_options = SourceSyncOptions {
+            tiktok: Some(TikTokSourceSyncOptions {
+                get_timeline: Some(false),
+                get_stories_user: Some(false),
+                get_reposts: Some(false),
+                target_video_url: Some(url.to_string()),
+                ..TikTokSourceSyncOptions::default()
+            }),
+            ..SourceSyncOptions::default()
+        };
+        let snapshot = source_sync_runtime::enqueue_source_sync(
+            &app,
+            RunSourceSyncInput {
+                id: source_id.to_string(),
+                trigger: Some("chrome_extension_story".to_string()),
+                run_mode: None,
+                sync_options_override: Some(override_options),
+            },
+        )?;
         return Ok(json!({
-            "downloaded": true,
+            "snapshot": snapshot,
+            "queued": true,
             "target": input.target
         }));
     }

@@ -57,6 +57,9 @@ pub struct TikTokConnectorRequest {
     /// Diretório de trabalho para os downloads temporários.
     pub cache_root: PathBuf,
     pub sections: TikTokSectionSelection,
+    /// Quando presente, o sync baixa APENAS este vídeo (URL `/video/<id>`) na
+    /// pasta `Stories/` do perfil — usado pela captura de story do Companion.
+    pub target_video_url: Option<String>,
     pub download_videos: bool,
     pub download_photos: bool,
     /// Vídeos vão para a subpasta `Video` (SeparateVideoFolder do SCrawler).
@@ -171,6 +174,39 @@ where
     let profile_url = format!("https://www.tiktok.com/@{handle}");
 
     let mut summary = TikTokManifestSummary::default();
+
+    // Story capturado pelo Companion: baixa só este vídeo na pasta Stories/ do
+    // perfil (com os cookies da conta), sem enumerar a timeline.
+    if let Some(target_url) = request
+        .target_video_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let stories_dir = request.profile_root.join("Stories");
+        fs::create_dir_all(&stories_dir).map_err(|error| error.to_string())?;
+        report_progress(TikTokProgress {
+            label: "Downloading story".to_string(),
+            detail: format!("Downloading the selected story for '{handle}'."),
+            downloaded_items: Some(0),
+            progress_percent: None,
+            indeterminate: true,
+        });
+        download_target_story_video(request, target_url, &stories_dir, &is_cancelled)?;
+        summary.downloaded_asset_count += 1;
+        return Ok(TikTokConnectorResult {
+            observed_posts: Vec::new(),
+            downloaded_media: Vec::new(),
+            section_errors: Vec::new(),
+            rate_limited: false,
+            limit_aborted: false,
+            resolved_user_id: None,
+            resolved_avatar_url: None,
+            duplicate_user_id: None,
+            resolved_handle: None,
+            manifest_summary: summary,
+        });
+    }
     let mut observed_posts: Vec<ObservedTikTokPost> = Vec::new();
     let mut downloaded_media: Vec<DownloadedTikTokMedia> = Vec::new();
     let mut section_errors: Vec<String> = Vec::new();
@@ -670,6 +706,55 @@ struct BatchOutcome {
 /// Baixa um lote de posts (vídeos e/ou fotos) numa única invocação do yt-dlp.
 /// O `--print after_move` informa o timestamp, o id do post e o caminho de cada
 /// arquivo produzido; movemos cada um para a pasta final com o prefixo de data.
+/// Baixa um único vídeo (story capturado pelo Companion) na pasta `Stories/` do
+/// perfil, com os cookies da conta e impersonation — mesmo caminho de download
+/// da timeline, mas sem enumerar.
+fn download_target_story_video<C>(
+    request: &TikTokConnectorRequest,
+    url: &str,
+    stories_dir: &std::path::Path,
+    is_cancelled: &C,
+) -> Result<(), String>
+where
+    C: Fn() -> bool,
+{
+    let output_template = format!(
+        "{}/%(uploader)s_%(timestamp)s_%(id)s.%(ext)s",
+        stories_dir.to_string_lossy().replace('\\', "/")
+    );
+    let mut command = Command::new(&request.yt_dlp_executable);
+    command
+        .arg("--ignore-errors")
+        .arg("--no-warnings")
+        .arg("--impersonate")
+        .arg(YT_DLP_IMPERSONATE)
+        .arg("--no-playlist")
+        .arg("--no-simulate")
+        .arg("--extractor-retries")
+        .arg("3")
+        .arg("--retries")
+        .arg("5")
+        .arg("--sleep-requests")
+        .arg("1")
+        .arg("--no-cookies-from-browser")
+        .arg("--cookies")
+        .arg(&request.cookie_file)
+        .arg("--no-mtime")
+        .arg("-o")
+        .arg(&output_template);
+    apply_user_agent(&mut command, request);
+    command
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    run_capturing(command, STORIES_TIMEOUT_SECS, is_cancelled, "yt-dlp (story)")?;
+    Ok(())
+}
+
 fn download_batch<C>(
     request: &TikTokConnectorRequest,
     batch: &[EnumeratedPost],
