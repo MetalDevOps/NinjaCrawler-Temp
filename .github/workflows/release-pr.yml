@@ -35,7 +35,10 @@ jobs:
 
       - name: Create or update the develop -> main release PR
         env:
-          GH_TOKEN: ${{ github.token }}
+          # PAT so the workflow can open the promotion PR. The default
+          # GITHUB_TOKEN is blocked by "Allow GitHub Actions to create and
+          # approve pull requests" being disabled on the repo.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           BASE: main
           HEAD: develop
         run: |
