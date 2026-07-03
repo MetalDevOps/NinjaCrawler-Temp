@@ -535,6 +535,38 @@ export interface SingleVideo {
   downloadedAt: string
 }
 
+export interface SingleVideoQueueItem {
+  id: string
+  url: string
+  provider?: string
+  state: 'queued' | 'running'
+  queuedAt: string
+  startedAt?: string
+  progressLabel?: string
+  progressIndeterminate?: boolean
+}
+
+export interface SingleVideoQueueRecentResult {
+  url: string
+  provider?: string
+  uploader?: string
+  title?: string
+  status: 'succeeded' | 'failed'
+  summary: string
+  finishedAt: string
+}
+
+export interface SingleVideoQueueStatus {
+  queuedCount: number
+  runningCount: number
+  completedCount: number
+  failedCount: number
+  active?: SingleVideoQueueItem
+  queuedItems: SingleVideoQueueItem[]
+  recentResults: SingleVideoQueueRecentResult[]
+  updatedAt: string
+}
+
 export interface SourceSyncQueueProviderStatus {
   provider: ProviderKey
   displayName: string

@@ -5505,6 +5505,17 @@ p {
   text-transform: uppercase;
 }
 
+/* URL do single video: uma linha, com reticências (URLs longas do TikTok). */
+.queue-task-url {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .queue-tag {
   display: inline-flex;
   align-items: center;
@@ -9781,6 +9792,16 @@ p {
   opacity: 1;
 }
 
+/* No Single Videos o overlay inferior mostra o @autor; reserva espaço à direita
+   para não ficar embaixo da lixeira (que aparece no hover no canto inferior
+   direito) e trunca com reticências quando o handle é longo. */
+.single-videos-shell .profile-view-thumb-overlay {
+  padding-right: 2.4rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .profile-view-card-actions {
   position: absolute;
   inset: 0.4rem 0.4rem auto auto;
@@ -10063,26 +10084,36 @@ p {
   flex: 0 1 260px;
 }
 
-.single-videos-card-body {
-  display: grid;
-  gap: 0.1rem;
-  padding: 0.35rem 0.15rem 0.1rem;
-  min-width: 0;
+/* Menu de contexto (botão direito) sobre um card do Single Videos. */
+.single-videos-context-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 240px;
+  padding: 0.3rem;
+  border-radius: 10px;
+  background: var(--surface, #1c1a17);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
 }
 
-.single-videos-uploader {
-  font-size: 0.78rem;
-  font-weight: 600;
+.single-videos-context-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
   color: var(--ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-size: 0.82rem;
+  cursor: pointer;
 }
 
-.single-videos-title {
-  font-size: 0.72rem;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.single-videos-context-menu button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.single-videos-context-menu button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
