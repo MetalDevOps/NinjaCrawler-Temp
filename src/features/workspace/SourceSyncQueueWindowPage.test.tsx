@@ -16,6 +16,8 @@ const bridgeMocks = vi.hoisted(() => ({
   loadSourceSyncQueueStatus: vi.fn(),
   loadWorkspaceSnapshot: vi.fn(),
   subscribeToDesktopRuntimeEvents: vi.fn(),
+  loadSingleVideoQueueStatus: vi.fn(),
+  subscribeToSingleVideoQueue: vi.fn(),
 }))
 
 vi.mock('../../bridge/desktop', () => bridgeMocks)
@@ -108,6 +110,16 @@ describe('SourceSyncQueueWindowPage', () => {
     bridgeMocks.loadSourceDeleteQueueStatus.mockResolvedValue(deleteStatusFixture())
     bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({ sources: [] })
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(() => undefined)
+    bridgeMocks.loadSingleVideoQueueStatus.mockResolvedValue({
+      queuedCount: 0,
+      runningCount: 0,
+      completedCount: 0,
+      failedCount: 0,
+      queuedItems: [],
+      recentResults: [],
+      updatedAt: '',
+    })
+    bridgeMocks.subscribeToSingleVideoQueue.mockResolvedValue(() => undefined)
   })
 
   afterEach(() => {
