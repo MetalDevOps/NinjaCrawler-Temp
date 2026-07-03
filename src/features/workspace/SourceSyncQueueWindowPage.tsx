@@ -6,6 +6,7 @@ import {
   loadSourceDeleteQueueStatus,
   loadSourceSyncQueueStatus,
   loadWorkspaceSnapshot,
+  openConnectorDebugWindow,
   pauseSourceSyncProvider,
   reorderSourceSyncProviderQueue,
   resumeSourceSyncProvider,
@@ -302,6 +303,7 @@ export function SourceSyncQueueWindowPage() {
   const [now, setNow] = useState(() => Date.now())
   const [error, setError] = useState<string>()
   const [singleVideoStatus, setSingleVideoStatus] = useState<SingleVideoQueueStatus | undefined>()
+  const [openingDebugger, setOpeningDebugger] = useState(false)
 
   const refreshQueueStatus = useCallback(async (silent = false) => {
     try {
@@ -460,6 +462,20 @@ export function SourceSyncQueueWindowPage() {
       setError(undefined)
     } catch (retryError) {
       setError(retryError instanceof Error ? retryError.message : `Failed to retry '${sourceId}'.`)
+    }
+  }, [])
+
+  const handleOpenDebugger = useCallback(async () => {
+    setOpeningDebugger(true)
+    try {
+      await openConnectorDebugWindow()
+      setError(undefined)
+    } catch (openError) {
+      setError(
+        openError instanceof Error ? openError.message : 'Failed to open the realtime debugger.',
+      )
+    } finally {
+      setOpeningDebugger(false)
     }
   }, [])
 
@@ -728,6 +744,21 @@ export function SourceSyncQueueWindowPage() {
 
   return (
     <div className="queue-status-window-shell">
+      <section className="queue-status-debug-toolbar panel">
+        <div>
+          <span className="eyebrow">Backend diagnostics</span>
+          <p>Follow queue events, sync stages, connector activity, warnings, and errors live.</p>
+        </div>
+        <button
+          className="primary-button"
+          disabled={openingDebugger}
+          onClick={() => void handleOpenDebugger()}
+          type="button"
+        >
+          {openingDebugger ? 'Opening debugger…' : 'Open realtime debugger'}
+        </button>
+      </section>
+
       <section className="queue-status-summary-strip" role="list" aria-label="Queue totals">
         <article className="queue-status-summary-card" role="listitem">
           <span>Running</span>

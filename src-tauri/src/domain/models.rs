@@ -360,6 +360,20 @@ pub struct RuntimeLogEntry {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConnectorDebugEntry {
+    pub id: String,
+    pub timestamp: String,
+    pub source_id: Option<String>,
+    pub provider: Option<String>,
+    pub source_handle: Option<String>,
+    pub connector: String,
+    pub event_type: String,
+    pub operation: String,
+    pub raw: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeLogContext {
     pub provider_catalog: Vec<ProviderDescriptor>,
     pub accounts: Vec<ProviderAccount>,
@@ -899,8 +913,8 @@ pub struct TikTokSourceSyncOptions {
     pub get_stories_user: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub get_reposts: Option<bool>,
-    /// Override run-only (captura de story do Companion): baixa apenas este vídeo
-    /// na pasta `Stories/`. Não é persistido nas opções do perfil.
+    /// Story capturado pelo Companion: baixa só este vídeo na pasta Stories/ do
+    /// perfil, sem enumerar a timeline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_video_url: Option<String>,
     /// Vídeos baixam via yt-dlp; fotos (posts de slideshow) via gallery-dl.
@@ -958,9 +972,9 @@ pub struct TikTokSourceSyncOptions {
 pub fn default_tiktok_source_sync_options() -> TikTokSourceSyncOptions {
     TikTokSourceSyncOptions {
         get_timeline: Some(true),
-        target_video_url: None,
         get_stories_user: Some(false),
         get_reposts: Some(false),
+        target_video_url: None,
         download_videos: Some(true),
         download_photos: Some(true),
         use_native_title: Some(false),
@@ -1240,6 +1254,15 @@ pub struct RuntimeLogQuery {
     pub scope: Option<String>,
     pub provider: Option<String>,
     pub account_id: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorDebugQuery {
+    pub limit: Option<u32>,
+    pub provider: Option<String>,
+    pub source_id: Option<String>,
+    pub event_type: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
