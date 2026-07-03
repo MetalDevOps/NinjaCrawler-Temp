@@ -192,11 +192,20 @@ where
             progress_percent: None,
             indeterminate: true,
         });
-        download_target_story_video(request, target_url, &stories_dir, &is_cancelled)?;
-        summary.downloaded_asset_count += 1;
+        let downloaded = download_target_story_video(request, target_url, &stories_dir, &is_cancelled)?;
+        let mut observed_posts = Vec::new();
+        let mut downloaded_media = Vec::new();
+        if let Some(media) = downloaded {
+            summary.downloaded_asset_count += 1;
+            observed_posts.push(ObservedTikTokPost {
+                provider_post_key: media.provider_post_key.clone(),
+                media_section: media.media_section.clone(),
+            });
+            downloaded_media.push(media);
+        }
         return Ok(TikTokConnectorResult {
-            observed_posts: Vec::new(),
-            downloaded_media: Vec::new(),
+            observed_posts,
+            downloaded_media,
             section_errors: Vec::new(),
             rate_limited: false,
             limit_aborted: false,
@@ -714,7 +723,7 @@ fn download_target_story_video<C>(
     url: &str,
     stories_dir: &std::path::Path,
     is_cancelled: &C,
-) -> Result<(), String>
+) -> Result<Option<DownloadedTikTokMedia>, String>
 where
     C: Fn() -> bool,
 {
@@ -741,7 +750,9 @@ where
         .arg(&request.cookie_file)
         .arg("--no-mtime")
         .arg("-o")
-        .arg(&output_template);
+        .arg(&output_template)
+        .arg("--print")
+        .arg("after_move:%(timestamp)s\t%(id)s\t%(filepath)s");
     apply_user_agent(&mut command, request);
     command
         .arg(url)
@@ -751,8 +762,48 @@ where
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    run_capturing(command, STORIES_TIMEOUT_SECS, is_cancelled, "yt-dlp (story)")?;
-    Ok(())
+    let (stdout, _stderr) =
+        run_capturing(command, STORIES_TIMEOUT_SECS, is_cancelled, "yt-dlp (story)")?;
+
+    // Extrai o vídeo baixado (metadados via --print) para registrá-lo no ledger,
+    // fazendo o story aparecer na seção Stories do perfil e contar no resumo.
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let timestamp = parts.next().unwrap_or("").trim();
+        let post_id = parts.next().unwrap_or("").trim();
+        let file_path = parts.next().unwrap_or("").trim();
+        if post_id.is_empty() || file_path.is_empty() {
+            continue;
+        }
+        let source_path = PathBuf::from(file_path);
+        if !source_path.exists() {
+            continue;
+        }
+        let captured_at_timestamp = timestamp.parse::<i64>().ok().filter(|value| *value > 0);
+        let final_file_name = source_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_string();
+        // Chaves prefixadas com `story_` (mesma convenção efêmera usada no ledger),
+        // garantindo dedup estável e mantendo o story fora da recuperação de handle.
+        let key = format!("story_{post_id}");
+        return Ok(Some(DownloadedTikTokMedia {
+            file_path: source_path,
+            media_type: "video".to_string(),
+            media_section: "stories".to_string(),
+            provider_media_key: key.clone(),
+            provider_post_key: key,
+            captured_at_timestamp,
+            final_file_name,
+        }));
+    }
+
+    Ok(None)
 }
 
 fn download_batch<C>(

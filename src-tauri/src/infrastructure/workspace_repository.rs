@@ -4023,6 +4023,33 @@ pub fn list_single_videos() -> Result<Vec<SingleVideo>, String> {
     })
 }
 
+/// Remove um vídeo avulso: manda o arquivo para a Lixeira e apaga a linha do
+/// catálogo. Devolve a lista atualizada.
+pub fn delete_single_video(id: String) -> Result<Vec<SingleVideo>, String> {
+    with_workspace(|connection, layout| {
+        let root = single_videos_root(connection, layout)?;
+        if let Some(relative) = connection
+            .query_row(
+                "SELECT relative_path FROM single_videos WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+        {
+            let absolute = root.join(&relative);
+            if absolute.exists() {
+                let _ = trash::delete(&absolute);
+            }
+        }
+        connection
+            .execute("DELETE FROM single_videos WHERE id = ?1", params![id])
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    })?;
+    list_single_videos()
+}
+
 pub fn run_instagram_media_naming_ledger_backfill<F>(
     mut on_progress: F,
 ) -> Result<InstagramNamingLedgerBackfillResult, String>

@@ -3,7 +3,9 @@ use crate::domain::models::{
     RunSourceSyncInput, SourceEditorSeedIntent, SourceEditorWindowIntent, SourceProfile,
     SourceSyncOptions, TikTokSourceSyncOptions,
 };
-use crate::infrastructure::{desktop_runtime, source_sync_runtime, workspace_repository};
+use crate::infrastructure::{
+    desktop_runtime, single_video_runtime, source_sync_runtime, workspace_repository,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -265,7 +267,7 @@ fn route_request(app: AppHandle, request: HttpRequest) -> Vec<u8> {
         }
         ("POST", path) if path == format!("{API_PREFIX}/single-video") => {
             match parse_json::<DownloadSingleVideoRequest>(&request.body)
-                .and_then(|input| workspace_repository::download_single_video(input.url))
+                .and_then(|input| single_video_runtime::enqueue_single_video(&app, input.url))
             {
                 Ok(payload) => json_response(200, &payload),
                 Err(error) => error_response(400, &error),

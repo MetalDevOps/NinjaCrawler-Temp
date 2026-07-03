@@ -12,8 +12,8 @@ use crate::domain::models::{
     SyncPlanTargetPreviewInput, SyncPlanUpsert, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
-    connector_runtime, desktop_runtime, import_runtime, source_delete_runtime, source_sync_runtime,
-    workspace_repository,
+    connector_runtime, desktop_runtime, import_runtime, single_video_runtime, source_delete_runtime,
+    source_sync_runtime, workspace_repository,
 };
 
 fn publish_snapshot(
@@ -562,15 +562,27 @@ pub fn load_source_media_gallery(
 }
 
 #[tauri::command]
-pub fn download_single_video(
+pub fn enqueue_single_video_download(
+    app: tauri::AppHandle,
     url: String,
-) -> Result<crate::domain::models::SingleVideo, String> {
-    workspace_repository::download_single_video(url)
+) -> Result<crate::domain::models::SingleVideoQueueStatus, String> {
+    single_video_runtime::enqueue_single_video(&app, url)
+}
+
+#[tauri::command]
+pub fn single_video_queue_status(
+) -> Result<crate::domain::models::SingleVideoQueueStatus, String> {
+    single_video_runtime::single_video_queue_status()
 }
 
 #[tauri::command]
 pub fn list_single_videos() -> Result<Vec<crate::domain::models::SingleVideo>, String> {
     workspace_repository::list_single_videos()
+}
+
+#[tauri::command]
+pub fn delete_single_video(id: String) -> Result<Vec<crate::domain::models::SingleVideo>, String> {
+    workspace_repository::delete_single_video(id)
 }
 
 #[tauri::command]

@@ -467,6 +467,47 @@ pub struct SingleVideo {
     pub downloaded_at: String,
 }
 
+/// Item da fila leve de downloads de single video (um worker sequencial). Sem
+/// persistência: um download interrompido pelo fechamento do app é perdido (o
+/// usuário reenvia a URL).
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleVideoQueueItem {
+    pub id: String,
+    pub url: String,
+    pub provider: Option<String>,
+    pub state: String,
+    pub queued_at: String,
+    pub started_at: Option<String>,
+    pub progress_label: Option<String>,
+    pub progress_indeterminate: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleVideoQueueRecentResult {
+    pub url: String,
+    pub provider: Option<String>,
+    pub uploader: Option<String>,
+    pub title: Option<String>,
+    pub status: String,
+    pub summary: String,
+    pub finished_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingleVideoQueueStatus {
+    pub queued_count: u32,
+    pub running_count: u32,
+    pub completed_count: u32,
+    pub failed_count: u32,
+    pub active: Option<SingleVideoQueueItem>,
+    pub queued_items: Vec<SingleVideoQueueItem>,
+    pub recent_results: Vec<SingleVideoQueueRecentResult>,
+    pub updated_at: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceSyncQueueProviderStatus {
