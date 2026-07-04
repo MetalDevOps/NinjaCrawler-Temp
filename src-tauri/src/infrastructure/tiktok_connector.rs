@@ -90,6 +90,8 @@ pub struct TikTokConnectorRequest {
     pub abort_on_limit: bool,
     /// Segundos entre lotes; `-1` desabilita (default SCrawler).
     pub sleep_timer_secs: i64,
+    pub collect_media_stats: bool,
+    pub refresh_existing_media_stats: bool,
     pub ledger_post_keys: HashSet<String>,
     pub ledger_media_keys: HashSet<String>,
     pub existing_relative_paths: HashSet<String>,
@@ -102,6 +104,10 @@ pub struct TikTokConnectorRequest {
 pub struct ObservedTikTokPost {
     pub provider_post_key: String,
     pub media_section: String,
+    pub view_count: Option<i64>,
+    pub like_count: Option<i64>,
+    pub comment_count: Option<i64>,
+    pub share_count: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -158,6 +164,10 @@ pub struct TikTokProgress {
 struct EnumeratedPost {
     post_id: String,
     webpage_url: String,
+    view_count: Option<i64>,
+    like_count: Option<i64>,
+    comment_count: Option<i64>,
+    share_count: Option<i64>,
 }
 
 pub fn run_profile_sync<F, C, D>(
@@ -204,6 +214,10 @@ where
             observed_posts.push(ObservedTikTokPost {
                 provider_post_key: media.provider_post_key.clone(),
                 media_section: media.media_section.clone(),
+                view_count: None,
+                like_count: None,
+                comment_count: None,
+                share_count: None,
             });
             downloaded_media.push(media);
         }
@@ -336,12 +350,46 @@ where
             }
             if request.ledger_post_keys.contains(&post.post_id) {
                 summary.skipped_existing_post_count += 1;
+                if request.collect_media_stats && request.refresh_existing_media_stats {
+                    observed_posts.push(observed_from_enumerated_post(&post));
+                }
                 continue;
             }
             summary.discovered_asset_count += 1;
             selected.push(post);
         }
         summary.queued_asset_count = selected.len() as u32;
+        if request.collect_media_stats && request.refresh_existing_media_stats {
+            let refreshed = observed_posts
+                .iter()
+                .filter(|post| {
+                    post.view_count.is_some()
+                        || post.like_count.is_some()
+                        || post.comment_count.is_some()
+                        || post.share_count.is_some()
+                })
+                .count();
+            report_progress(TikTokProgress {
+                label: "Refreshing media stats".to_string(),
+                detail: format!(
+                    "Collected fresh stats for {refreshed} existing post(s) out of {} scanned.",
+                    summary.normalized_post_count
+                ),
+                downloaded_items: Some(summary.downloaded_asset_count),
+                progress_percent: Some(50),
+                indeterminate: false,
+            });
+            connector_debug::append_current(
+                "internal.tiktok",
+                "system",
+                "stats.refresh.complete",
+                format!(
+                    "posts_scanned={}\nstats_refreshed={refreshed}\nstats_missing={}",
+                    summary.normalized_post_count,
+                    summary.normalized_post_count.saturating_sub(refreshed as u32)
+                ),
+            );
+        }
         connector_debug::append_current(
             "internal.tiktok",
             "system",
@@ -457,11 +505,17 @@ where
             }
         }
 
-        for post_id in downloaded_post_ids {
-            observed_posts.push(ObservedTikTokPost {
-                provider_post_key: post_id,
-                media_section: "timeline".to_string(),
-            });
+        for post in &selected {
+            if downloaded_post_ids.contains(&post.post_id) {
+                let mut observed = observed_from_enumerated_post(post);
+                if !request.collect_media_stats {
+                    observed.view_count = None;
+                    observed.like_count = None;
+                    observed.comment_count = None;
+                    observed.share_count = None;
+                }
+                observed_posts.push(observed);
+            }
         }
         }
 
@@ -493,6 +547,10 @@ where
                             observed_posts.push(ObservedTikTokPost {
                                 provider_post_key: media.provider_post_key.clone(),
                                 media_section,
+                                view_count: None,
+                                like_count: None,
+                                comment_count: None,
+                                share_count: None,
                             });
                         }
                         summary.downloaded_asset_count += 1;
@@ -730,7 +788,7 @@ where
         .arg(YT_DLP_IMPERSONATE)
         .arg("--flat-playlist")
         .arg("--print")
-        .arg("%(id)s\t%(webpage_url)s\t%(uploader_id)s")
+        .arg("%(id)s\t%(webpage_url)s\t%(uploader_id)s\t%(view_count)s\t%(like_count)s\t%(comment_count)s\t%(repost_count)s")
         .arg("--no-cookies-from-browser")
         .arg("--cookies")
         .arg(&request.cookie_file);
@@ -762,6 +820,10 @@ where
         let post_id = parts.next().unwrap_or("").trim();
         let webpage_url = parts.next().unwrap_or("").trim();
         let uploader = parts.next().unwrap_or("").trim();
+        let view_count = parse_optional_count(parts.next());
+        let like_count = parse_optional_count(parts.next());
+        let comment_count = parse_optional_count(parts.next());
+        let share_count = parse_optional_count(parts.next());
         if post_id.is_empty() || post_id == "NA" {
             continue;
         }
@@ -776,6 +838,10 @@ where
         posts.push(EnumeratedPost {
             post_id: post_id.to_string(),
             webpage_url: url,
+            view_count,
+            like_count,
+            comment_count,
+            share_count,
         });
     }
 
@@ -784,6 +850,24 @@ where
         uploader_id,
         rate_limited,
     })
+}
+
+fn parse_optional_count(value: Option<&str>) -> Option<i64> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "NA")
+        .and_then(|value| value.parse::<i64>().ok())
+}
+
+fn observed_from_enumerated_post(post: &EnumeratedPost) -> ObservedTikTokPost {
+    ObservedTikTokPost {
+        provider_post_key: post.post_id.clone(),
+        media_section: "timeline".to_string(),
+        view_count: post.view_count,
+        like_count: post.like_count,
+        comment_count: post.comment_count,
+        share_count: post.share_count,
+    }
 }
 
 struct BatchOutcome {

@@ -211,6 +211,7 @@ export function SourceEditorSyncPanel({
               />
             ))}
           </SyncGroupCard>
+
         </div>
 
         <div className="source-editor-sync-column">
@@ -507,6 +508,22 @@ function TikTokSyncPanel({ tiktokSyncOptions, localDateFormat, onTikTokSyncOptio
               label="Use video date as file date"
               onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'useParsedVideoDate', checked)}
               tooltip="Set the file modified date to the post date (yt-dlp --mtime)."
+            />
+          </SyncGroupCard>
+
+          <SyncGroupCard className="source-editor-sync-group-stats" title="Stats">
+            <ToggleRow
+              checked={tiktokSyncOptions.collectMediaStats !== false}
+              label="Collect media stats"
+              onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'collectMediaStats', checked)}
+              tooltip="Store views, likes, comments, and shares reported by TikTok for newly downloaded media."
+            />
+            <ToggleRow
+              checked={Boolean(tiktokSyncOptions.refreshExistingMediaStats)}
+              disabled={tiktokSyncOptions.collectMediaStats === false}
+              label="Refresh existing media stats"
+              onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'refreshExistingMediaStats', checked)}
+              tooltip="Also fetch fresh stats for media already downloaded. Liked videos use a full scan while this is enabled, which can make syncs significantly slower."
             />
           </SyncGroupCard>
 

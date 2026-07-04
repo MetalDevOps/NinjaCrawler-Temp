@@ -615,6 +615,8 @@ describe('SourceEditorDialog', () => {
     const likedVideosLimit = screen.getByRole('spinbutton', { name: 'Liked videos limit' }) as HTMLInputElement
     const incrementalLikes = screen.getByRole('checkbox', { name: 'Incremental liked videos' }) as HTMLInputElement
     const knownPages = screen.getByRole('spinbutton', { name: 'Known pages before stopping' }) as HTMLInputElement
+    const collectStats = screen.getByRole('checkbox', { name: 'Collect media stats' }) as HTMLInputElement
+    const refreshStats = screen.getByRole('checkbox', { name: 'Refresh existing media stats' }) as HTMLInputElement
     const downloadFrom = screen.getByLabelText('Download from') as HTMLInputElement
     expect(likedVideos).toBeTruthy()
     expect(likedVideosLimit.value).toBe('100')
@@ -623,6 +625,11 @@ describe('SourceEditorDialog', () => {
     expect(incrementalLikes.disabled).toBe(true)
     expect(knownPages.value).toBe('3')
     expect(knownPages.disabled).toBe(true)
+    expect(collectStats.checked).toBe(true)
+    expect(refreshStats.checked).toBe(false)
+    expect(refreshStats.disabled).toBe(false)
+    fireEvent.click(collectStats)
+    expect(refreshStats.disabled).toBe(true)
     expect(downloadFrom.type).toBe('text')
     expect(screen.getByRole('button', { name: 'Pick Download from' })).toBeTruthy()
     expect(screen.getByText(/files are saved to this profile's Liked\/ subfolder/i)).toBeTruthy()

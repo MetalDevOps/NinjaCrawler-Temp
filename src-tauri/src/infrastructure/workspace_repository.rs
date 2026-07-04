@@ -300,6 +300,10 @@ fn normalize_tiktok_source_sync_options(
     merged.liked_videos_known_page_threshold = merged
         .liked_videos_known_page_threshold
         .or(defaults.liked_videos_known_page_threshold);
+    merged.collect_media_stats = merged.collect_media_stats.or(defaults.collect_media_stats);
+    merged.refresh_existing_media_stats = merged
+        .refresh_existing_media_stats
+        .or(defaults.refresh_existing_media_stats);
     merged.download_videos = merged.download_videos.or(defaults.download_videos);
     merged.download_photos = merged.download_photos.or(defaults.download_photos);
     merged.use_native_title = merged.use_native_title.or(defaults.use_native_title);
@@ -2164,6 +2168,45 @@ struct GalleryMediaLedgerLink {
     captured_at: Option<i64>,
 }
 
+#[derive(Default, Clone)]
+struct GalleryPostStats {
+    view_count: Option<i64>,
+    like_count: Option<i64>,
+    comment_count: Option<i64>,
+    share_count: Option<i64>,
+    updated_at: Option<String>,
+}
+
+fn load_gallery_post_stats(
+    connection: &Connection,
+    provider: &str,
+    source_id: &str,
+) -> HashMap<String, GalleryPostStats> {
+    let Ok(mut statement) = connection.prepare(
+        "SELECT provider_post_key, view_count, like_count, comment_count,
+                share_count, stats_updated_at
+         FROM provider_sync_post_ledger
+         WHERE provider = ?1 AND source_id = ?2 AND stats_updated_at IS NOT NULL",
+    ) else {
+        return HashMap::new();
+    };
+    let Ok(rows) = statement.query_map(params![provider, source_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            GalleryPostStats {
+                view_count: row.get(1)?,
+                like_count: row.get(2)?,
+                comment_count: row.get(3)?,
+                share_count: row.get(4)?,
+                updated_at: row.get(5)?,
+            },
+        ))
+    }) else {
+        return HashMap::new();
+    };
+    rows.flatten().collect()
+}
+
 /// Loads the relative-path → link map used to rebuild post URLs and resolve the
 /// feed/reels section. Instagram keeps its own ledger (with the case-sensitive
 /// shortcode); TikTok/Twitter share the provider-neutral ledger (with the post
@@ -2304,6 +2347,7 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
         // merges shortcodes read from the legacy SCrawler XML.
         let ledger_links =
             load_gallery_media_ledger_links(connection, &provider, &source_id, &profile_root);
+        let post_stats = load_gallery_post_stats(connection, &provider, &source_id);
         // Twitter has no status id in the file name and older media ledger rows
         // predate the post-key column, so pair files with their tweet id via the
         // legacy SCrawler XML (keyed by media key). Empty for other providers.
@@ -2505,6 +2549,10 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     is_video,
                     acc.ledger_post_code.as_deref(),
                 );
+                let stats = post_id_for_url
+                    .and_then(|post_id| post_stats.get(post_id))
+                    .cloned()
+                    .unwrap_or_default();
                 // Seção e data preferem o ledger; caem para o derivado do nome.
                 let section = acc
                     .ledger_section
@@ -2546,6 +2594,11 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     section,
                     albums,
                     poster_path,
+                    view_count: stats.view_count,
+                    like_count: stats.like_count,
+                    comment_count: stats.comment_count,
+                    share_count: stats.share_count,
+                    stats_updated_at: stats.updated_at,
                     files,
                 });
             }
@@ -7467,6 +7520,9 @@ fn execute_tiktok_source_sync_with_connection(
     let liked_videos_limit = options.liked_videos_limit.unwrap_or(100);
     let liked_videos_incremental = options.liked_videos_incremental.unwrap_or(true);
     let liked_videos_known_page_threshold = options.liked_videos_known_page_threshold.unwrap_or(3);
+    let collect_media_stats = options.collect_media_stats.unwrap_or(true);
+    let refresh_existing_media_stats =
+        collect_media_stats && options.refresh_existing_media_stats.unwrap_or(false);
     if liked_videos_limit < 0 {
         return Err("TikTok liked videos limit cannot be negative.".to_string());
     }
@@ -7561,6 +7617,8 @@ fn execute_tiktok_source_sync_with_connection(
         download_to_date: options.download_to_date.filter(|value| *value > 0),
         abort_on_limit: options.abort_on_limit.unwrap_or(true),
         sleep_timer_secs: options.sleep_timer_secs.unwrap_or(-1),
+        collect_media_stats,
+        refresh_existing_media_stats,
         ledger_post_keys,
         ledger_media_keys,
         existing_relative_paths,
@@ -7597,6 +7655,8 @@ fn execute_tiktok_source_sync_with_connection(
                     item_limit: liked_videos_limit as usize,
                     incremental: liked_videos_incremental,
                     known_page_threshold: liked_videos_known_page_threshold as usize,
+                    collect_media_stats,
+                    refresh_existing_media_stats,
                 },
                 |percent, label, detail, indeterminate, downloaded| {
                     let queue_percent = percent.map(|value| {
@@ -7839,6 +7899,14 @@ fn execute_tiktok_source_sync_with_connection(
                 &observed_posts,
                 &finished_at,
             )?;
+            if collect_media_stats {
+                upsert_tiktok_post_stats(
+                    connection,
+                    &context.source.id,
+                    &result.observed_posts,
+                    &finished_at,
+                )?;
+            }
             upsert_provider_sync_media_ledger_entries(
                 connection,
                 "tiktok",
@@ -7894,12 +7962,34 @@ fn execute_tiktok_source_sync_with_connection(
             }
 
             let downloaded = result.downloaded_media.len() + likes.downloaded;
+            let stats_updated = likes.stats_updated
+                + result
+                .observed_posts
+                .iter()
+                .filter(|post| {
+                    post.view_count.is_some()
+                        || post.like_count.is_some()
+                        || post.comment_count.is_some()
+                        || post.share_count.is_some()
+                })
+                .count();
             let mut summary = format!(
-                "TikTok sync succeeded. Downloaded {} media item(s) from {} new post(s) (queued {}).",
+                "TikTok sync succeeded. Scanned {} post(s), found {} new post(s), downloaded {} media item(s).",
+                result.manifest_summary.normalized_post_count,
+                result.manifest_summary.queued_asset_count,
                 downloaded,
-                result.observed_posts.len(),
-                result.manifest_summary.queued_asset_count
             );
+            if collect_media_stats {
+                summary.push_str(&format!(
+                    " Stats: updated {} post(s){}.",
+                    stats_updated,
+                    if refresh_existing_media_stats {
+                        " including existing media"
+                    } else {
+                        ""
+                    }
+                ));
+            }
             if liked_videos_enabled {
                 summary.push_str(&format!(
                     " Liked videos: read {} pages, discovered {}, downloaded {}, skipped {} existing, failed {}{}.",
@@ -8075,6 +8165,37 @@ fn upsert_provider_sync_post_ledger_entries(
                     provider_post_key,
                     &post.media_section,
                     timestamp,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn upsert_tiktok_post_stats(
+    connection: &Connection,
+    source_id: &str,
+    observed_posts: &[tiktok_connector::ObservedTikTokPost],
+    timestamp: &str,
+) -> Result<(), String> {
+    for post in observed_posts {
+        if post.view_count.is_none()
+            && post.like_count.is_none()
+            && post.comment_count.is_none()
+            && post.share_count.is_none()
+        {
+            continue;
+        }
+        connection
+            .execute(
+                "UPDATE provider_sync_post_ledger
+                 SET view_count = ?1, like_count = ?2, comment_count = ?3,
+                     share_count = ?4, stats_updated_at = ?5
+                 WHERE provider = 'tiktok' AND source_id = ?6
+                   AND provider_post_key = ?7",
+                params![
+                    post.view_count, post.like_count, post.comment_count,
+                    post.share_count, timestamp, source_id, &post.provider_post_key,
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -17013,6 +17134,11 @@ mod tests {
             section: "timeline".to_string(),
             albums: Vec::new(),
             poster_path: None,
+            view_count: None,
+            like_count: None,
+            comment_count: None,
+            share_count: None,
+            stats_updated_at: None,
             files: Vec::new(),
         };
         // TikTok: usa o post id.

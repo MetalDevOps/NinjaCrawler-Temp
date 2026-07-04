@@ -1614,6 +1614,10 @@ function normalizeTikTokSourceSyncOptions(value: unknown): TikTokSourceSyncOptio
     getReposts: booleanValue(value, ['getReposts', 'get_reposts'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getReposts ?? false),
     getLikedVideos: booleanValue(value, ['getLikedVideos', 'get_liked_videos'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getLikedVideos ?? false),
     likedVideosLimit: Math.max(0, Math.trunc(numberValue(value, ['likedVideosLimit', 'liked_videos_limit'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.likedVideosLimit ?? 100))),
+    likedVideosIncremental: booleanValue(value, ['likedVideosIncremental', 'liked_videos_incremental'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.likedVideosIncremental ?? true),
+    likedVideosKnownPageThreshold: Math.max(1, Math.trunc(numberValue(value, ['likedVideosKnownPageThreshold', 'liked_videos_known_page_threshold'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.likedVideosKnownPageThreshold ?? 3))),
+    collectMediaStats: booleanValue(value, ['collectMediaStats', 'collect_media_stats'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.collectMediaStats ?? true),
+    refreshExistingMediaStats: booleanValue(value, ['refreshExistingMediaStats', 'refresh_existing_media_stats'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.refreshExistingMediaStats ?? false),
     downloadVideos: booleanValue(value, ['downloadVideos', 'download_videos'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.downloadVideos ?? true),
     downloadPhotos: booleanValue(value, ['downloadPhotos', 'download_photos'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.downloadPhotos ?? true),
     useNativeTitle: booleanValue(value, ['useNativeTitle', 'use_native_title'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.useNativeTitle ?? false),
@@ -2547,6 +2551,11 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
         ? post.albums.filter((album): album is string => typeof album === 'string')
         : [],
       posterPath: optionalStringValue(post, ['posterPath', 'poster_path']),
+      viewCount: optionalNumberValue(post, ['viewCount', 'view_count']),
+      likeCount: optionalNumberValue(post, ['likeCount', 'like_count']),
+      commentCount: optionalNumberValue(post, ['commentCount', 'comment_count']),
+      shareCount: optionalNumberValue(post, ['shareCount', 'share_count']),
+      statsUpdatedAt: optionalStringValue(post, ['statsUpdatedAt', 'stats_updated_at']),
       files: (Array.isArray(post.files) ? post.files : []).filter(isRecord).map((file) => ({
         relativePath: stringValue(file, ['relativePath', 'relative_path'], ''),
         absolutePath: stringValue(file, ['absolutePath', 'absolute_path'], ''),

@@ -148,6 +148,8 @@ export interface TikTokSourceSyncOptions {
   likedVideosLimit?: number
   likedVideosIncremental?: boolean
   likedVideosKnownPageThreshold?: number
+  collectMediaStats?: boolean
+  refreshExistingMediaStats?: boolean
   downloadVideos?: boolean
   downloadPhotos?: boolean
   useNativeTitle?: boolean
@@ -541,6 +543,11 @@ export interface MediaGalleryPost {
    */
   albums?: string[]
   posterPath?: string
+  viewCount?: number
+  likeCount?: number
+  commentCount?: number
+  shareCount?: number
+  statsUpdatedAt?: string
   files: MediaGalleryFile[]
 }
 

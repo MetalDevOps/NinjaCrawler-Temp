@@ -32,6 +32,7 @@ function galleryFixture(): SourceMediaGallery {
         postId: '7624199329925958920',
         postUrl: 'https://www.tiktok.com/@gaaby.tls/video/7624199329925958920',
         capturedAt: day,
+        viewCount: 10,
         mediaType: 'video',
         section: 'timeline',
         files: [
@@ -42,6 +43,7 @@ function galleryFixture(): SourceMediaGallery {
         postId: '7600000000000000000',
         postUrl: 'https://www.tiktok.com/@gaaby.tls/video/7600000000000000000',
         capturedAt: day - 60,
+        viewCount: 100,
         mediaType: 'slideshow',
         section: 'timeline',
         files: [
@@ -115,6 +117,23 @@ describe('ProfileViewPage', () => {
         'https://www.tiktok.com/@gaaby.tls/video/7624199329925958920',
       )
     })
+  })
+
+  it('sorts media by TikTok view count when Popular is selected', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findAllByRole('button', { name: 'Online' })
+
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sort media by' }), {
+      target: { value: 'popular' },
+    })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Online' })[0])
+
+    await waitFor(() => {
+      expect(bridgeMocks.openExternalTarget).toHaveBeenCalledWith(
+        'https://www.tiktok.com/@gaaby.tls/video/7600000000000000000',
+      )
+    })
+    expect(localStorage.getItem('profileView.sortMode')).toBe('popular')
   })
 
   it('switches to the "all media" grid and persists the choice', async () => {

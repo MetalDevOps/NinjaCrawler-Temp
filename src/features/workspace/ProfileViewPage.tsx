@@ -21,12 +21,14 @@ interface ProfileViewPageProps {
 }
 
 type ViewMode = 'day' | 'grid'
+type SortMode = 'latest' | 'popular' | 'oldest'
 /** Modos de visualização dos Highlights: por álbum (padrão) ou os comuns. */
 type HighlightsMode = 'album' | 'day' | 'grid'
 
 const VIEW_MODE_STORAGE_KEY = 'profileView.mode'
 const HIGHLIGHTS_MODE_STORAGE_KEY = 'profileView.highlightsMode'
 const DENSITY_STORAGE_KEY = 'profileView.density'
+const SORT_MODE_STORAGE_KEY = 'profileView.sortMode'
 
 /** Seção dos Highlights do Instagram (ver isEphemeralStorySection). */
 const HIGHLIGHTS_SECTION = 'stories'
@@ -64,6 +66,16 @@ function readStoredDensity(): number {
     /* ignore */
   }
   return DEFAULT_DENSITY_INDEX
+}
+
+function readStoredSortMode(): SortMode {
+  try {
+    const stored = localStorage.getItem(SORT_MODE_STORAGE_KEY)
+    if (stored === 'popular' || stored === 'oldest') return stored
+  } catch {
+    /* ignore */
+  }
+  return 'latest'
 }
 
 interface FlatItem {
@@ -108,6 +120,13 @@ function dayLabel(key: string, capturedAt?: number): string {
 
 function isVideo(mediaType: string): boolean {
   return mediaType === 'video'
+}
+
+function compactCount(value: number): string {
+  return new Intl.NumberFormat(undefined, {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(value)
 }
 
 /** Identificador estável de um post para seleção (o 1º arquivo é único por post). */
@@ -180,6 +199,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [viewMode, setViewMode] = useState<ViewMode>(readStoredMode)
   const [highlightsMode, setHighlightsMode] = useState<HighlightsMode>(readStoredHighlightsMode)
   const [densityIndex, setDensityIndex] = useState<number>(readStoredDensity)
+  const [sortMode, setSortMode] = useState<SortMode>(readStoredSortMode)
   const [sectionFilter, setSectionFilter] = useState<string>(SECTION_FILTER_ALL)
   const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT)
   const [selectMode, setSelectMode] = useState(false)
@@ -213,6 +233,13 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       /* ignore */
     }
   }, [densityIndex])
+  useEffect(() => {
+    try {
+      localStorage.setItem(SORT_MODE_STORAGE_KEY, sortMode)
+    } catch {
+      /* ignore */
+    }
+  }, [sortMode])
 
   // Reabrir a janela para outro perfil emite o novo sourceId.
   useEffect(() => {
@@ -315,19 +342,31 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
 
   const visiblePosts = useMemo<MediaGalleryPost[]>(() => {
     if (!gallery) return []
-    if (sectionFilter === SECTION_FILTER_ALL) return gallery.posts
+    let filtered: MediaGalleryPost[]
+    if (sectionFilter === SECTION_FILTER_ALL) {
+      filtered = gallery.posts
     // Highlights reúne todos os posts que pertencem a algum álbum (inclusive os
     // que moram no Feed via associação), não só os da seção física `stories`.
-    if (sectionFilter === HIGHLIGHTS_SECTION) {
-      return gallery.posts.filter((post) => (post.albums?.length ?? 0) > 0)
+    } else if (sectionFilter === HIGHLIGHTS_SECTION) {
+      filtered = gallery.posts.filter((post) => (post.albums?.length ?? 0) > 0)
+    } else {
+      filtered = gallery.posts.filter((post) => (post.section || 'timeline') === sectionFilter)
     }
-    return gallery.posts.filter((post) => (post.section || 'timeline') === sectionFilter)
-  }, [gallery, sectionFilter])
+    return [...filtered].sort((left, right) => {
+      const dateDifference = (right.capturedAt ?? 0) - (left.capturedAt ?? 0)
+      if (sortMode === 'oldest') return -dateDifference
+      if (sortMode === 'popular') {
+        const viewDifference = (right.viewCount ?? -1) - (left.viewCount ?? -1)
+        return viewDifference || dateDifference
+      }
+      return dateDifference
+    })
+  }, [gallery, sectionFilter, sortMode])
 
   // Reinicia a janela ao trocar de perfil ou de filtro (conteúdo diferente).
   useEffect(() => {
     setRenderLimit(INITIAL_RENDER_LIMIT)
-  }, [sourceId, sectionFilter])
+  }, [sourceId, sectionFilter, sortMode])
 
   // Subconjunto efetivamente montado no DOM (a janela cresce no scroll).
   const renderedPosts = useMemo(
@@ -338,14 +377,16 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
 
   const days = useMemo<DayGroup[]>(() => {
     const groups: DayGroup[] = []
-    let current: DayGroup | undefined
+    const byKey = new Map<string, DayGroup>()
     for (const post of renderedPosts) {
       const key = dayKey(post.capturedAt)
-      if (!current || current.key !== key) {
-        current = { key, label: dayLabel(key, post.capturedAt), posts: [] }
-        groups.push(current)
+      let group = byKey.get(key)
+      if (!group) {
+        group = { key, label: dayLabel(key, post.capturedAt), posts: [] }
+        byKey.set(key, group)
+        groups.push(group)
       }
-      current.posts.push(post)
+      group.posts.push(post)
     }
     return groups
   }, [renderedPosts])
@@ -571,12 +612,15 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
             : undefined
         }
         overlayText={
-          post.capturedAt
-            ? new Date(post.capturedAt * 1000).toLocaleTimeString(undefined, {
+          [
+            post.viewCount !== undefined ? `${compactCount(post.viewCount)} views` : '',
+            post.capturedAt
+              ? new Date(post.capturedAt * 1000).toLocaleTimeString(undefined, {
                 hour: '2-digit',
                 minute: '2-digit',
               })
-            : ''
+              : '',
+          ].filter(Boolean).join(' · ')
         }
         selected={selected}
         selectMode={selectMode}
@@ -756,6 +800,16 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   ))}
                 </div>
               ) : null}
+              <select
+                aria-label="Sort media by"
+                className="workspace-toolbar-select"
+                onChange={(event) => setSortMode(event.target.value as SortMode)}
+                value={sortMode}
+              >
+                <option value="latest">Latest</option>
+                <option value="popular">Popular</option>
+                <option value="oldest">Oldest</option>
+              </select>
               <div className="profile-view-density" role="group" aria-label="Thumbnail size">
                 <button
                   className="ghost-button queue-icon-button"

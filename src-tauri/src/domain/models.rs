@@ -449,6 +449,11 @@ pub struct MediaGalleryPost {
     pub albums: Vec<String>,
     /// Caminho absoluto de uma miniatura/poster (cover do vídeo, quando houver).
     pub poster_path: Option<String>,
+    pub view_count: Option<i64>,
+    pub like_count: Option<i64>,
+    pub comment_count: Option<i64>,
+    pub share_count: Option<i64>,
+    pub stats_updated_at: Option<String>,
     pub files: Vec<MediaGalleryFile>,
 }
 
@@ -923,6 +928,10 @@ pub struct TikTokSourceSyncOptions {
     pub liked_videos_incremental: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liked_videos_known_page_threshold: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collect_media_stats: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_existing_media_stats: Option<bool>,
     /// Story capturado pelo Companion: baixa só este vídeo na pasta Stories/ do
     /// perfil, sem enumerar a timeline.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -988,6 +997,8 @@ pub fn default_tiktok_source_sync_options() -> TikTokSourceSyncOptions {
         liked_videos_limit: Some(100),
         liked_videos_incremental: Some(true),
         liked_videos_known_page_threshold: Some(3),
+        collect_media_stats: Some(true),
+        refresh_existing_media_stats: Some(false),
         target_video_url: None,
         download_videos: Some(true),
         download_photos: Some(true),

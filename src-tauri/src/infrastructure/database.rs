@@ -133,6 +133,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         35,
         include_str!("../../migrations/0035_account_sync_scope_state.sql"),
     ),
+    (
+        36,
+        include_str!("../../migrations/0036_provider_post_stats.sql"),
+    ),
 ];
 
 pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
