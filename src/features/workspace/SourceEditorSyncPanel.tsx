@@ -463,6 +463,35 @@ function TikTokSyncPanel({ tiktokSyncOptions, onTikTokSyncOptionsChange }: TikTo
               onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'getReposts', checked)}
               tooltip="Sync reposts (saved to the Reposts/ subfolder)."
             />
+            <ToggleRow
+              checked={Boolean(tiktokSyncOptions.getLikedVideos)}
+              label="Liked videos"
+              onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'getLikedVideos', checked)}
+              tooltip="Sync videos liked by the authenticated TikTok account. Files are saved to this profile's Liked/ subfolder."
+            />
+            <NumberFieldRow
+              disabled={!tiktokSyncOptions.getLikedVideos}
+              label="Liked videos limit"
+              min={0}
+              onChange={(value) => updateTikTokOption(onTikTokSyncOptionsChange, 'likedVideosLimit', Math.max(0, value))}
+              tooltip="Maximum liked videos per sync. Use 0 to fetch every available liked video."
+              value={tiktokSyncOptions.likedVideosLimit ?? 100}
+            />
+            <ToggleRow
+              checked={tiktokSyncOptions.likedVideosIncremental !== false}
+              disabled={!tiktokSyncOptions.getLikedVideos}
+              label="Incremental liked videos"
+              onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'likedVideosIncremental', checked)}
+              tooltip="After one complete scan, stop when consecutive pages contain only downloaded media. Disable this to force a full rescan, including media that may have become visible again."
+            />
+            <NumberFieldRow
+              disabled={!tiktokSyncOptions.getLikedVideos || tiktokSyncOptions.likedVideosIncremental === false}
+              label="Known pages before stopping"
+              min={1}
+              onChange={(value) => updateTikTokOption(onTikTokSyncOptionsChange, 'likedVideosKnownPageThreshold', Math.max(1, value))}
+              tooltip="Number of consecutive pages containing only existing downloads before an incremental scan stops."
+              value={tiktokSyncOptions.likedVideosKnownPageThreshold ?? 3}
+            />
           </SyncGroupCard>
 
           <SyncGroupCard className="source-editor-sync-group-media" title="Media">
@@ -691,10 +720,11 @@ interface NumberFieldRowProps {
   tooltip?: string
   value: number
   disabled?: boolean
+  min?: number
   onChange: (value: number) => void
 }
 
-function NumberFieldRow({ label, tooltip, value, disabled = false, onChange }: NumberFieldRowProps) {
+function NumberFieldRow({ label, tooltip, value, disabled = false, min, onChange }: NumberFieldRowProps) {
   const inputId = useId()
 
   return (
@@ -707,6 +737,7 @@ function NumberFieldRow({ label, tooltip, value, disabled = false, onChange }: N
         aria-label={label}
         disabled={disabled}
         id={inputId}
+        min={min}
         onChange={(event) => {
           const parsed = Number.parseInt(event.target.value, 10)
           onChange(Number.isNaN(parsed) ? -1 : parsed)
