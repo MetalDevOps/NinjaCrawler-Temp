@@ -15538,17 +15538,37 @@ fn try_instagram_graphql_avatar(
     .to_string();
     let doc_id = "25980296051578533";
     let friendly_name = "PolarisProfilePageContentQuery";
-    let url = format!(
-        "https://www.instagram.com/api/graphql?doc_id={}&lsd={}&fb_dtsg={}&fb_api_req_friendly_name={}&variables={}",
-        avatar_percent_encode(doc_id),
-        avatar_percent_encode(lsd),
-        avatar_percent_encode(dtsg),
-        avatar_percent_encode(friendly_name),
-        avatar_percent_encode(&variables),
-    );
+    // Instagram's /api/graphql only accepts POST with a form-urlencoded body; a
+    // GET with the same parameters in the query string is rejected with 400 (see
+    // post_graphql_json in instagram_connector.rs). `av` (acting user id from the
+    // `ds_user_id` cookie) and `jazoest` (a checksum of fb_dtsg) are required too.
+    let mut body = String::new();
+    if let Some(av) = avatar_cookie_value(cookie_header, "ds_user_id") {
+        body.push_str("av=");
+        body.push_str(&avatar_percent_encode(&av));
+        body.push('&');
+    }
+    body.push_str("__comet_req=7&fb_dtsg=");
+    body.push_str(&avatar_percent_encode(dtsg));
+    body.push_str("&jazoest=");
+    body.push_str(&avatar_percent_encode(&avatar_jazoest(dtsg)));
+    body.push_str("&lsd=");
+    body.push_str(&avatar_percent_encode(lsd));
+    body.push_str("&fb_api_caller_class=RelayModern&fb_api_req_friendly_name=");
+    body.push_str(&avatar_percent_encode(friendly_name));
+    body.push_str("&doc_id=");
+    body.push_str(&avatar_percent_encode(doc_id));
+    body.push_str("&variables=");
+    body.push_str(&avatar_percent_encode(&variables));
+    body.push_str("&server_timestamps=true");
+
     let mut request = client
-        .get(&url)
+        .post("https://www.instagram.com/api/graphql")
         .header(reqwest::header::ACCEPT, "*/*")
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
         .header(reqwest::header::COOKIE, cookie_header)
         .header(reqwest::header::REFERER, referer)
         .header(reqwest::header::USER_AGENT, user_agent)
@@ -15562,6 +15582,7 @@ fn try_instagram_graphql_avatar(
     if let Some(value) = ig_asbd_id {
         request = request.header("x-asbd-id", value);
     }
+    request = request.body(body);
     let response = request.send().map_err(|error| {
         ProfilePictureRefreshError::warning(format!(
             "Failed to fetch Instagram profile metadata via GraphQL: {error}"
@@ -15619,6 +15640,22 @@ fn avatar_percent_encode(value: &str) -> String {
         }
     }
     output
+}
+
+fn avatar_cookie_value(cookie_header: &str, name: &str) -> Option<String> {
+    cookie_header
+        .split(';')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| key.trim() == name)
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Facebook/Instagram anti-CSRF checksum derived from `fb_dtsg`: the literal `2`
+/// followed by the sum of the token's byte values.
+fn avatar_jazoest(token: &str) -> String {
+    let sum: u32 = token.bytes().map(u32::from).sum();
+    format!("2{sum}")
 }
 
 fn parse_instagram_profile_picture_url(payload: &serde_json::Value) -> Option<String> {

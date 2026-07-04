@@ -16,6 +16,10 @@ use crate::infrastructure::connector_debug;
 /// App id público da web do Instagram, usado em consultas anônimas de identidade.
 const INSTAGRAM_PUBLIC_APP_ID: &str = "936619743392459";
 const INSTAGRAM_PUBLIC_ASBD_ID: &str = "129477";
+/// Instagram's Relay GraphQL endpoint. It only accepts POST requests with the
+/// query parameters in a form-urlencoded body; a GET with the same parameters in
+/// the query string is rejected with `400 Bad Request` (an HTML error page).
+const INSTAGRAM_GRAPHQL_ENDPOINT: &str = "https://www.instagram.com/api/graphql";
 
 #[derive(Clone)]
 pub struct SessionCookie {
@@ -354,6 +358,114 @@ impl InstagramClient {
 
         serde_json::from_str(&body)
             .map_err(|error| format!("Instagram JSON decode failed for '{url}': {error}"))
+    }
+
+    /// POSTs a persisted (`doc_id`) GraphQL query to Instagram's Relay endpoint.
+    /// The parameters go in a form-urlencoded body — the endpoint rejects the GET
+    /// equivalent with `400 Bad Request` — mirroring what the web client sends.
+    fn post_graphql_json(
+        &mut self,
+        doc_id: &str,
+        lsd: &str,
+        dtsg: &str,
+        friendly_name: &str,
+        variables: &str,
+        referer: Option<&str>,
+    ) -> Result<Value, String> {
+        let acting_user_id = cookie_value(&self.cookie_header, "ds_user_id");
+        let body = build_graphql_body(
+            doc_id,
+            lsd,
+            dtsg,
+            friendly_name,
+            variables,
+            acting_user_id.as_deref(),
+        );
+        let extra_headers = [
+            ("x-fb-friendly-name", friendly_name.to_string()),
+            ("x-fb-lsd", lsd.to_string()),
+        ];
+
+        let (mut status, mut response_body) =
+            self.send_graphql_post(&body, referer, self.header_mode, &extra_headers)?;
+
+        if status == reqwest::StatusCode::BAD_REQUEST
+            && response_body.to_ascii_lowercase().contains("useragent mismatch")
+            && self.header_mode != InstagramHeaderMode::Relaxed
+        {
+            self.header_mode = InstagramHeaderMode::Relaxed;
+            let (retry_status, retry_body) =
+                self.send_graphql_post(&body, referer, self.header_mode, &extra_headers)?;
+            status = retry_status;
+            response_body = retry_body;
+        }
+
+        if !status.is_success() {
+            return Err(format!(
+                "Instagram request '{INSTAGRAM_GRAPHQL_ENDPOINT}' returned {}: {}",
+                status,
+                truncate_for_error(&response_body)
+            ));
+        }
+
+        serde_json::from_str(&response_body).map_err(|error| {
+            format!("Instagram JSON decode failed for '{INSTAGRAM_GRAPHQL_ENDPOINT}': {error}")
+        })
+    }
+
+    fn send_graphql_post(
+        &mut self,
+        body: &str,
+        referer: Option<&str>,
+        header_mode: InstagramHeaderMode,
+        extra_headers: &[(&str, String)],
+    ) -> Result<(reqwest::StatusCode, String), String> {
+        self.wait_for_pacing();
+        connector_debug::append_current(
+            "instagram-http",
+            "call",
+            "POST graphql",
+            format!(
+                "POST {INSTAGRAM_GRAPHQL_ENDPOINT}\nReferer: {}\nHeader-Mode: {}\n\n{body}",
+                referer.unwrap_or("-"),
+                if header_mode == InstagramHeaderMode::BrowserLike {
+                    "browser-like"
+                } else {
+                    "relaxed"
+                }
+            ),
+        );
+
+        let mut request = self.client.post(INSTAGRAM_GRAPHQL_ENDPOINT);
+        request = self.apply_headers(request, referer, header_mode);
+        request = request.header("content-type", "application/x-www-form-urlencoded");
+        for (name, value) in extra_headers {
+            request = request.header(*name, value);
+        }
+        request = request.body(body.to_string());
+
+        let response = request.send().map_err(|error| {
+            connector_debug::append_current(
+                "instagram-http",
+                "error",
+                "POST graphql",
+                error.to_string(),
+            );
+            format!("Instagram request failed for '{INSTAGRAM_GRAPHQL_ENDPOINT}': {error}")
+        })?;
+        self.absorb_response_headers(response.headers());
+        let status = response.status();
+        let body = response.text().map_err(|error| {
+            format!("Instagram response read failed for '{INSTAGRAM_GRAPHQL_ENDPOINT}': {error}")
+        })?;
+        self.last_request_at = Some(Instant::now());
+        connector_debug::append_current(
+            "instagram-http",
+            "response",
+            "POST graphql",
+            format!("HTTP {status}\n\n{body}"),
+        );
+        Ok((status, body))
     }
 
     fn download_file(
@@ -2249,15 +2361,14 @@ fn load_profile_description_gql(
         escape_json(user_id)
     );
     let referer = format!("https://www.instagram.com/{username}/");
-    let url = build_graphql_url("7381344031985950", &lsd, &dtsg, friendly_name, &variables);
     let payload = client
-        .get_json_with_extra_headers(
-            &url,
+        .post_graphql_json(
+            "7381344031985950",
+            &lsd,
+            &dtsg,
+            friendly_name,
+            &variables,
             Some(&referer),
-            &[
-                ("x-fb-friendly-name", friendly_name.to_string()),
-                ("x-fb-lsd", lsd),
-            ],
         )
         .ok()?;
 
@@ -2350,14 +2461,13 @@ fn load_timeline_items(
                 };
                 let variables =
                     build_timeline_gql_variables(username, page_size, cursor.as_deref());
-                let url = build_graphql_url(doc_id, &lsd, &dtsg, friendly_name, &variables);
-                let payload = match client.get_json_with_extra_headers(
-                    &url,
+                let payload = match client.post_graphql_json(
+                    doc_id,
+                    &lsd,
+                    &dtsg,
+                    friendly_name,
+                    &variables,
                     Some(&format!("https://www.instagram.com/{username}/")),
-                    &[
-                        ("x-fb-friendly-name", friendly_name.to_string()),
-                        ("x-fb-lsd", lsd.clone()),
-                    ],
                 ) {
                     Ok(payload) => payload,
                     Err(error) => {
@@ -2511,23 +2621,13 @@ fn load_reel_items(
                     page_size,
                     gql_cursor.as_deref(),
                 );
-                let url = build_graphql_url(
+                let payload = match client.post_graphql_json(
                     "7191572580905225",
                     &lsd,
                     &dtsg,
                     "PolarisProfileReelsTabContentQuery",
                     &variables,
-                );
-                let payload = match client.get_json_with_extra_headers(
-                    &url,
                     Some("https://www.instagram.com/"),
-                    &[
-                        (
-                            "x-fb-friendly-name",
-                            "PolarisProfileReelsTabContentQuery".to_string(),
-                        ),
-                        ("x-fb-lsd", lsd.clone()),
-                    ],
                 ) {
                     Ok(payload) => payload,
                     Err(error) => {
@@ -2632,23 +2732,13 @@ fn load_tagged_items(
                     page_size,
                     gql_cursor.as_deref(),
                 );
-                let url = build_graphql_url(
+                let payload = match client.post_graphql_json(
                     "7289408964443685",
                     &lsd,
                     &dtsg,
                     "PolarisProfileTaggedTabContentQuery",
                     &variables,
-                );
-                let payload = match client.get_json_with_extra_headers(
-                    &url,
                     Some("https://www.instagram.com/"),
-                    &[
-                        (
-                            "x-fb-friendly-name",
-                            "PolarisProfileTaggedTabContentQuery".to_string(),
-                        ),
-                        ("x-fb-lsd", lsd.clone()),
-                    ],
                 ) {
                     Ok(payload) => payload,
                     Err(error) => {
@@ -3525,21 +3615,57 @@ fn hydrate_tagged_items(
     Ok(hydrated_items)
 }
 
-fn build_graphql_url(
+/// Builds the form-urlencoded body for a persisted GraphQL query, matching the
+/// fields Instagram's web client posts. `av` (the acting user id, read from the
+/// `ds_user_id` cookie) and `jazoest` (a checksum of `fb_dtsg`) are required by
+/// the endpoint alongside the query itself.
+fn build_graphql_body(
     doc_id: &str,
     lsd: &str,
     dtsg: &str,
     friendly_name: &str,
     variables_json: &str,
+    acting_user_id: Option<&str>,
 ) -> String {
-    format!(
-        "https://www.instagram.com/api/graphql?doc_id={}&lsd={}&fb_dtsg={}&fb_api_req_friendly_name={}&variables={}",
-        percent_encode_component(doc_id),
-        percent_encode_component(lsd),
-        percent_encode_component(dtsg),
-        percent_encode_component(friendly_name),
-        percent_encode_component(variables_json),
-    )
+    let mut body = String::new();
+    if let Some(av) = acting_user_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.push_str("av=");
+        body.push_str(&percent_encode_component(av));
+        body.push('&');
+    }
+    body.push_str("__comet_req=7&fb_dtsg=");
+    body.push_str(&percent_encode_component(dtsg));
+    body.push_str("&jazoest=");
+    body.push_str(&percent_encode_component(&compute_jazoest(dtsg)));
+    body.push_str("&lsd=");
+    body.push_str(&percent_encode_component(lsd));
+    body.push_str("&fb_api_caller_class=RelayModern&fb_api_req_friendly_name=");
+    body.push_str(&percent_encode_component(friendly_name));
+    body.push_str("&doc_id=");
+    body.push_str(&percent_encode_component(doc_id));
+    body.push_str("&variables=");
+    body.push_str(&percent_encode_component(variables_json));
+    body.push_str("&server_timestamps=true");
+    body
+}
+
+/// Facebook/Instagram anti-CSRF checksum derived from `fb_dtsg`: the literal
+/// `2` followed by the sum of the token's byte values.
+fn compute_jazoest(token: &str) -> String {
+    let sum: u32 = token.bytes().map(u32::from).sum();
+    format!("2{sum}")
+}
+
+fn cookie_value(cookie_header: &str, name: &str) -> Option<String> {
+    cookie_header
+        .split(';')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| key.trim() == name)
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn escape_json(value: &str) -> String {
@@ -3742,9 +3868,9 @@ fn fallback_media_stem(item_id: &str, variant_index: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_single_asset, best_image_url, build_manifest_section, build_media_file_name,
-        collect_media_assets, execute_manifest_section, extract_reels_payload_items,
-        normalize_profile_sync_manifest,
+        append_single_asset, best_image_url, build_graphql_body, build_manifest_section,
+        build_media_file_name, collect_media_assets, compute_jazoest, cookie_value,
+        execute_manifest_section, extract_reels_payload_items, normalize_profile_sync_manifest,
         parse_profile_description, parse_profile_description_from_user,
         provider_media_identity_from_url, public_identity_headers, resolve_destination_path,
         should_ignore_media_download_error, DownloadedInstagramMedia, InstagramAuthHeaders,
@@ -3752,6 +3878,49 @@ mod tests {
         InstagramMediaFileNamingMode, InstagramSectionSelection, InstagramSyncManifest, MediaAsset,
         PlannedMediaAsset,
     };
+
+    #[test]
+    fn compute_jazoest_sums_token_bytes_with_prefix() {
+        // '1'..'5' → 49+50+51+52+53 = 255.
+        assert_eq!(compute_jazoest("12345"), "2255");
+    }
+
+    #[test]
+    fn cookie_value_reads_named_cookie() {
+        let header = "csrftoken=abc; ds_user_id=17841400000000000; sessionid=xyz";
+        assert_eq!(
+            cookie_value(header, "ds_user_id").as_deref(),
+            Some("17841400000000000")
+        );
+        assert_eq!(cookie_value(header, "missing"), None);
+    }
+
+    #[test]
+    fn build_graphql_body_posts_query_fields() {
+        let body = build_graphql_body(
+            "123",
+            "the-lsd",
+            "the-dtsg",
+            "PolarisProfileReelsTabContentQuery",
+            "{\"target_user_id\":\"42\"}",
+            Some("17841400000000000"),
+        );
+
+        assert!(body.contains("doc_id=123"));
+        assert!(body.contains("fb_dtsg=the-dtsg"));
+        assert!(body.contains("lsd=the-lsd"));
+        assert!(body.contains("av=17841400000000000"));
+        assert!(body.contains("fb_api_req_friendly_name=PolarisProfileReelsTabContentQuery"));
+        // `variables` must be percent-encoded so the JSON braces survive transport.
+        assert!(body.contains("variables=%7B%22target_user_id%22%3A%2242%22%7D"));
+        assert!(body.contains(&format!("jazoest={}", compute_jazoest("the-dtsg"))));
+    }
+
+    #[test]
+    fn build_graphql_body_omits_av_without_user_cookie() {
+        let body = build_graphql_body("123", "l", "d", "Friendly", "{}", None);
+        assert!(!body.contains("av="));
+    }
     use serde_json::json;
     use std::collections::HashSet;
     use std::fs;
