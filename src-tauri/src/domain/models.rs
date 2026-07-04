@@ -439,6 +439,13 @@ pub struct MediaGalleryPost {
     pub post_id: Option<String>,
     pub post_url: Option<String>,
     pub captured_at: Option<i64>,
+    /// Momento (unix) em que a mídia foi baixada/vista pela 1ª vez pelo app —
+    /// derivado do `first_seen_at` do ledger, com fallback para o mtime do
+    /// arquivo. Usado como eixo alternativo de ordenação (Download Date).
+    pub downloaded_at: Option<i64>,
+    /// Autor original do conteúdo. Só é preenchido nos Likes do TikTok (o dono
+    /// do perfil curtiu o vídeo de outra pessoa); usado para busca por autor.
+    pub author: Option<String>,
     /// "video" | "image" | "slideshow"
     pub media_type: String,
     /// Subpasta do perfil ("timeline"/raiz, "stories", "reposts", "video").
@@ -465,6 +472,63 @@ pub struct SourceMediaGallery {
     pub handle: String,
     pub profile_url: String,
     pub posts: Vec<MediaGalleryPost>,
+}
+
+/// Lote de thumbnails de vídeo gerados sob demanda (ffmpeg) para o grid do
+/// Profile View. `available=false` sinaliza que o ffmpeg não está instalado —
+/// o front cai no thumb por `<video>` de antes.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaThumbnailBatch {
+    pub available: bool,
+    /// caminho absoluto do vídeo → caminho absoluto do jpg em cache.
+    pub thumbs: HashMap<String, String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaThumbnailQueueItem {
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    pub state: String,
+    pub queued_at: String,
+    pub started_at: Option<String>,
+    pub files_scanned: u32,
+    pub files_total: u32,
+    pub files_processed: u32,
+    pub generated: u32,
+    pub skipped_existing: u32,
+    pub failed: u32,
+    pub current_file: Option<String>,
+    pub progress_percent: Option<u32>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaThumbnailQueueResult {
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    pub status: String,
+    pub summary: String,
+    pub generated: u32,
+    pub skipped_existing: u32,
+    pub failed: u32,
+    pub finished_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaThumbnailQueueStatus {
+    pub queued_count: u32,
+    pub running_count: u32,
+    pub completed_count: u32,
+    pub failed_count: u32,
+    pub active: Option<MediaThumbnailQueueItem>,
+    pub queued_items: Vec<MediaThumbnailQueueItem>,
+    pub recent_results: Vec<MediaThumbnailQueueResult>,
+    pub updated_at: String,
 }
 
 /// Vídeo avulso capturado por URL (via Companion), fora da estrutura de perfis.

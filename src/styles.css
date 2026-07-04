@@ -131,6 +131,7 @@
   --font-display: 'Bahnschrift SemiCondensed', 'Bahnschrift', 'Arial Narrow', sans-serif;
   --font-body: 'Corbel', 'Segoe UI', sans-serif;
   --font-mono: 'Cascadia Mono', 'Consolas', monospace;
+  --font-data: 'Cascadia Mono', 'Cascadia Code', 'Consolas', monospace;
   color: var(--ink);
   background: var(--bg-main);
   font-family: var(--font-body);
@@ -1549,6 +1550,18 @@ p {
   justify-content: space-between;
   gap: 1rem;
   align-items: center;
+}
+
+.operator-list-row strong {
+  font-family: var(--font-data);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+.operator-list-row small {
+  font-family: var(--font-data);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .operator-mini-button {
@@ -4756,6 +4769,9 @@ p {
   padding: 0.55rem 0.62rem;
   border: 1px solid var(--line-warm);
   background: var(--glass-solid);
+  font-family: var(--font-data);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .accounts-config-row {
@@ -4952,12 +4968,18 @@ p {
 }
 
 .accounts-cookie-list-item strong {
+  font-family: var(--font-data);
   font-size: 0.8rem;
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .accounts-cookie-list-item span {
   color: var(--muted);
+  font-family: var(--font-data);
   font-size: 0.76rem;
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .accounts-cookie-list-item:hover,
@@ -4970,6 +4992,13 @@ p {
   overflow: auto;
   padding: 0.8rem;
   background: var(--surface-input);
+}
+
+.accounts-cookie-editor-panel input,
+.accounts-cookie-editor-panel textarea {
+  font-family: var(--font-data);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .accounts-cookie-form-grid {
@@ -5218,9 +5247,11 @@ p {
 
 .runtime-log-entry-time,
 .runtime-log-entry-facts span {
-  font-family: var(--font-mono);
+  font-family: var(--font-data);
   font-size: 0.72rem;
   color: var(--muted);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .runtime-log-entry-scope {
@@ -5237,9 +5268,11 @@ p {
   padding: 0.08rem 0.4rem;
   border: 1px solid var(--line-warm);
   background: var(--glass-subtle-hover);
-  font-family: var(--font-mono);
+  font-family: var(--font-data);
   font-size: 0.71rem;
   color: var(--muted-strong);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .runtime-log-scope-segment {
@@ -5264,10 +5297,12 @@ p {
   border: 1px solid var(--line-warm);
   background: var(--canvas);
   white-space: pre-wrap;
-  font-family: var(--font-mono);
+  font-family: var(--font-data);
   font-size: 0.73rem;
   line-height: 1.45;
   color: var(--ink-soft);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .runtime-log-token {
@@ -5367,32 +5402,177 @@ p {
     var(--bg-profile-shell);
 }
 
-.queue-status-debug-toolbar {
+.queue-status-toolbar {
   align-items: center;
   display: flex;
-  gap: 18px;
+  gap: 1rem;
   justify-content: space-between;
-  padding: 14px 16px;
+  min-height: 2.6rem;
+  padding: 0 0.2rem;
 }
 
-.queue-status-debug-toolbar p {
+.queue-status-toolbar h1 {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  margin: 0;
+}
+
+.queue-status-toolbar p {
   color: var(--text-muted);
-  font-size: 12px;
-  margin: 4px 0 0;
+  font-size: 0.72rem;
+  margin: 0.12rem 0 0;
 }
 
-.queue-status-debug-toolbar .primary-button {
+.queue-status-toolbar .ghost-button {
   flex: 0 0 auto;
 }
 
+.thumbnail-queue-panel {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.8rem 0.9rem;
+}
+
+.thumbnail-queue-heading,
+.thumbnail-queue-controls,
+.thumbnail-queue-progress > div:first-child {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.thumbnail-queue-heading p {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin: 0.12rem 0 0;
+}
+
+.thumbnail-queue-heading h2 {
+  font-family: var(--font-body);
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.thumbnail-target-count {
+  color: var(--muted);
+  font-family: var(--font-data);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums slashed-zero;
+  white-space: nowrap;
+}
+
+.thumbnail-queue-controls {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.65fr) minmax(190px, 1fr) auto;
+  justify-content: stretch;
+}
+
+.thumbnail-queue-controls label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.thumbnail-queue-controls label > span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.thumbnail-queue-controls select {
+  appearance: auto;
+  background: var(--surface-input);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  color-scheme: light dark;
+  font-family: var(--font-body);
+  min-height: 34px;
+  padding: 0 0.55rem;
+  width: 100%;
+}
+
+.thumbnail-queue-controls select:focus {
+  border-color: var(--signal);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+  outline: none;
+}
+
+.thumbnail-queue-controls select option {
+  background: var(--surface-popover);
+  color: var(--ink);
+}
+
+[data-theme="dark"] .thumbnail-queue-controls select {
+  color-scheme: dark;
+}
+
+.thumbnail-queue-controls .primary-button {
+  align-self: end;
+}
+
+.thumbnail-queue-progress {
+  display: grid;
+  gap: 7px;
+}
+
+.thumbnail-queue-progress span,
+.thumbnail-queue-progress small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.thumbnail-queue-progress-detail {
+  display: flex;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.thumbnail-queue-progress-detail > :first-child {
+  flex: 0 0 auto;
+}
+
+.thumbnail-current-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-data {
+  font-family: var(--font-data);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+.thumbnail-queue-recent {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+}
+
+.thumbnail-queue-recent small {
+  color: var(--text-muted);
+}
+
 @media (max-width: 680px) {
-  .queue-status-debug-toolbar {
+  .queue-status-toolbar {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .queue-status-debug-toolbar .primary-button {
+  .queue-status-toolbar .ghost-button {
     width: 100%;
+  }
+
+  .thumbnail-queue-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .thumbnail-queue-progress-detail {
+    flex-direction: column;
+    gap: 0.18rem;
   }
 }
 
@@ -5590,7 +5770,9 @@ p {
 
 .queue-lane-counts b {
   color: var(--ink);
-  font-family: var(--font-display);
+  font-family: var(--font-data);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .queue-count-failed b {
@@ -5965,15 +6147,23 @@ p {
 }
 
 .queue-status-summary-card strong {
-  font-family: var(--font-display);
+  font-family: var(--font-data);
   font-size: 1.34rem;
+  font-feature-settings: "zero" 1, "tnum" 1;
   line-height: 1;
-  font-variant-numeric: tabular-nums;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .queue-status-summary-card small {
   color: var(--muted);
   line-height: 1.35;
+}
+
+.queue-task-meta,
+.queue-recent-panel .pill {
+  font-family: var(--font-data);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .queue-status-progress-track {
@@ -8816,11 +9006,14 @@ p {
 }
 
 .scheduler-plan-row-meta {
+  font-family: var(--font-data);
   font-size: 0.74rem;
   color: var(--ink-soft);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .scheduler-plan-row:hover {
@@ -9215,6 +9408,9 @@ p {
   color: var(--ink);
   cursor: pointer;
   transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+  font-family: var(--font-data);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .plans-date-picker-day:hover {
@@ -9964,6 +10160,115 @@ p {
   text-align: center;
 }
 
+.profile-view-sort {
+  position: relative;
+  display: inline-flex;
+}
+
+.profile-view-sort-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.9rem;
+}
+
+.profile-view-sort-toggle[aria-expanded='true'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.profile-view-sort-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  right: 0;
+  z-index: 50;
+  min-width: 176px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0.28rem 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-popover);
+  box-shadow: var(--shadow);
+}
+
+.profile-view-sort-group {
+  padding: 0.3rem 0.65rem 0.15rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.profile-view-sort-item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  grid-template-columns: none;
+  font-size: 0.82rem;
+}
+
+.profile-view-sort-check {
+  width: 0.9rem;
+  flex-shrink: 0;
+  color: var(--accent);
+  text-align: center;
+}
+
+.profile-view-sort-item[aria-checked='true'] {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.profile-view-sort-divider {
+  height: 1px;
+  margin: 0.28rem 0.5rem;
+  background: var(--line);
+}
+
+.profile-view-search {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Aberta, a busca vira um campo pill discreto (ícone + input + fechar). */
+.profile-view-search.is-open {
+  gap: 0.3rem;
+  padding: 0.12rem 0.3rem 0.12rem 0.55rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-input);
+}
+
+.profile-view-search-icon {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.profile-view-search-input {
+  width: 148px;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.8rem;
+  outline: none;
+  /* Remove o "x" nativo do type=search (usamos o nosso). */
+  appearance: none;
+}
+
+.profile-view-search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.profile-view-search-clear {
+  min-width: 1.5rem;
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
 .profile-view-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(var(--pv-thumb-min, 160px), 1fr));
@@ -9979,9 +10284,46 @@ p {
   contain-intrinsic-size: auto 240px;
 }
 
-.profile-view-sentinel {
+/* Container virtualizado: altura total reservada (barra de rolagem fiel); cada
+   linha é posicionada em absoluto via translateY pelo @tanstack/react-virtual. */
+.profile-view-virtual {
+  position: relative;
   width: 100%;
-  height: 1px;
+}
+
+.profile-view-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  /* Gap vertical entre as fileiras/linhas virtuais (espelha o gap do grid). */
+  padding-bottom: 0.55rem;
+}
+
+/* Colunas fixas para todas as fileiras ficarem alinhadas (o nº vem do JS). */
+.profile-view-grid-virtual {
+  grid-template-columns: repeat(var(--pv-cols, 1), minmax(0, 1fr));
+}
+
+/* A linha virtual já está inteira na viewport, então dispensa o placeholder do
+   content-visibility — a altura real (aspect-ratio) vale para o measure. */
+.profile-view-grid-virtual .profile-view-card {
+  content-visibility: visible;
+  contain-intrinsic-size: auto;
+}
+
+/* Sem seções roláveis nativas, o cabeçalho de dia não gruda mais no topo. */
+.profile-view-virtual-row .profile-view-day-header {
+  position: static;
+  margin-bottom: 0;
+}
+
+/* Cabeçalho de grupo por autor (@handle): preserva a caixa original. */
+.profile-view-user-title {
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-size: 0.85rem;
+  color: var(--text);
 }
 
 .profile-view-thumb {
@@ -10029,7 +10371,6 @@ p {
   pointer-events: none;
 }
 
-.profile-view-badge,
 .profile-view-section {
   position: absolute;
   padding: 0.06rem 0.4rem;
@@ -10043,6 +10384,21 @@ p {
   pointer-events: none;
 }
 
+.profile-view-badge {
+  position: absolute;
+  padding: 0.06rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-family: var(--font-data);
+  font-size: 0.58rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  pointer-events: none;
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
 /* Slideshow count: top-right. Section pill: bottom-left, clear of the
    top-left selection checkbox so the two never overlap. */
 .profile-view-badge { top: 0.35rem; right: 0.35rem; }
@@ -10054,7 +10410,7 @@ p {
   padding: 0.7rem 0.45rem 0.3rem;
   background: linear-gradient(transparent, rgba(0, 0, 0, 0.6));
   color: #fff;
-  font-family: var(--font-mono);
+  font-family: var(--font-data);
   font-size: 0.6rem;
   letter-spacing: 0.04em;
   /* Time sits bottom-right so it never overlaps the bottom-left section pill. */
@@ -10062,6 +10418,8 @@ p {
   opacity: 0;
   transition: opacity 0.12s ease;
   pointer-events: none;
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
 
 .profile-view-card:hover .profile-view-thumb-overlay {
@@ -10287,6 +10645,15 @@ p {
   display: grid;
   gap: 0.6rem;
   justify-items: center;
+}
+
+/* Nome do perfil/autor acima da mídia no lightbox. */
+.profile-view-lightbox-title {
+  color: #fff;
+  font-family: var(--font-display);
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
 }
 
 .profile-view-lightbox-stage img,

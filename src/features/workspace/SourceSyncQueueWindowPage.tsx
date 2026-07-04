@@ -3,6 +3,8 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import {
   cancelSourceSyncProfile,
   cancelSourceSyncProvider,
+  enqueueMediaThumbnailGeneration,
+  loadMediaThumbnailQueueStatus,
   loadSourceDeleteQueueStatus,
   loadSourceSyncQueueStatus,
   loadWorkspaceSnapshot,
@@ -25,8 +27,11 @@ import type {
   SourceSyncQueueProviderStatus,
   SourceSyncQueueRecentResult,
   SourceSyncQueueStatus,
+  MediaThumbnailQueueStatus,
+  SchedulerGroup,
   SingleVideoQueueRecentResult,
   SingleVideoQueueStatus,
+  SourceProfile,
 } from '../../domain/models'
 
 type QueueOperation = 'Sync' | 'Delete' | 'Single'
@@ -304,6 +309,12 @@ export function SourceSyncQueueWindowPage() {
   const [error, setError] = useState<string>()
   const [singleVideoStatus, setSingleVideoStatus] = useState<SingleVideoQueueStatus | undefined>()
   const [openingDebugger, setOpeningDebugger] = useState(false)
+  const [librarySources, setLibrarySources] = useState<SourceProfile[]>([])
+  const [libraryGroups, setLibraryGroups] = useState<SchedulerGroup[]>([])
+  const [thumbnailScope, setThumbnailScope] = useState<'all' | 'provider' | 'group' | 'profile'>('profile')
+  const [thumbnailScopeValue, setThumbnailScopeValue] = useState('')
+  const [thumbnailStatus, setThumbnailStatus] = useState<MediaThumbnailQueueStatus>()
+  const [queueingThumbnails, setQueueingThumbnails] = useState(false)
 
   const refreshQueueStatus = useCallback(async (silent = false) => {
     try {
@@ -331,6 +342,8 @@ export function SourceSyncQueueWindowPage() {
   const refreshAvatars = useCallback(async () => {
     try {
       const snapshot = await loadWorkspaceSnapshot()
+      setLibrarySources(snapshot.sources)
+      setLibraryGroups(snapshot.schedulerGroups)
       const map: Record<string, string> = {}
       for (const source of snapshot.sources) {
         if (source.profileImagePath) {
@@ -342,6 +355,45 @@ export function SourceSyncQueueWindowPage() {
       // avatar é cosmético; ignora falha
     }
   }, [])
+
+  useEffect(() => {
+    const refresh = () => {
+      void loadMediaThumbnailQueueStatus().then(setThumbnailStatus).catch(() => undefined)
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 750)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  const thumbnailTargetIds = useMemo(() => {
+    switch (thumbnailScope) {
+      case 'all':
+        return librarySources.map((source) => source.id)
+      case 'provider':
+        return librarySources
+          .filter((source) => source.provider === thumbnailScopeValue)
+          .map((source) => source.id)
+      case 'group':
+        return librarySources
+          .filter((source) => source.groupId === thumbnailScopeValue)
+          .map((source) => source.id)
+      default:
+        return thumbnailScopeValue ? [thumbnailScopeValue] : []
+    }
+  }, [librarySources, thumbnailScope, thumbnailScopeValue])
+
+  const handleQueueThumbnails = async () => {
+    if (thumbnailTargetIds.length === 0) return
+    setQueueingThumbnails(true)
+    try {
+      setThumbnailStatus(await enqueueMediaThumbnailGeneration(thumbnailTargetIds))
+      setError(undefined)
+    } catch (queueError) {
+      setError(queueError instanceof Error ? queueError.message : 'Failed to queue thumbnails.')
+    } finally {
+      setQueueingThumbnails(false)
+    }
+  }
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -744,19 +796,125 @@ export function SourceSyncQueueWindowPage() {
 
   return (
     <div className="queue-status-window-shell">
-      <section className="queue-status-debug-toolbar panel">
+      <header className="queue-status-toolbar">
         <div>
-          <span className="eyebrow">Backend diagnostics</span>
-          <p>Follow queue events, sync stages, connector activity, warnings, and errors live.</p>
+          <h1>Queue activity</h1>
+          <p>Downloads, deletions, single videos, and media maintenance.</p>
         </div>
         <button
-          className="primary-button"
+          aria-label="Open realtime debugger"
+          className="ghost-button"
           disabled={openingDebugger}
           onClick={() => void handleOpenDebugger()}
           type="button"
         >
-          {openingDebugger ? 'Opening debugger…' : 'Open realtime debugger'}
+          {openingDebugger ? 'Opening…' : 'Realtime debugger'}
         </button>
+      </header>
+
+      <section className="thumbnail-queue-panel panel">
+        <div className="thumbnail-queue-heading">
+          <div>
+            <h2>Generate thumbnails</h2>
+            <p>Only missing video thumbnails are created. Existing files stay untouched.</p>
+          </div>
+          <span className="thumbnail-target-count">
+            {thumbnailTargetIds.length} profile{thumbnailTargetIds.length === 1 ? '' : 's'}
+          </span>
+        </div>
+        <div className="thumbnail-queue-controls">
+          <label>
+            <span>Scope</span>
+            <select
+              value={thumbnailScope}
+              onChange={(event) => {
+                setThumbnailScope(event.target.value as typeof thumbnailScope)
+                setThumbnailScopeValue('')
+              }}
+            >
+              <option value="profile">Profile</option>
+              <option value="group">Group</option>
+              <option value="provider">Provider</option>
+              <option value="all">Entire library</option>
+            </select>
+          </label>
+          {thumbnailScope === 'profile' ? (
+            <label>
+              <span>Profile</span>
+              <select value={thumbnailScopeValue} onChange={(event) => setThumbnailScopeValue(event.target.value)}>
+                <option value="">Select a profile…</option>
+                {librarySources.map((source) => <option key={source.id} value={source.id}>{source.handle}</option>)}
+              </select>
+            </label>
+          ) : null}
+          {thumbnailScope === 'group' ? (
+            <label>
+              <span>Group</span>
+              <select value={thumbnailScopeValue} onChange={(event) => setThumbnailScopeValue(event.target.value)}>
+                <option value="">Select a group…</option>
+                {libraryGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+              </select>
+            </label>
+          ) : null}
+          {thumbnailScope === 'provider' ? (
+            <label>
+              <span>Provider</span>
+              <select value={thumbnailScopeValue} onChange={(event) => setThumbnailScopeValue(event.target.value)}>
+                <option value="">Select a provider…</option>
+                {DEFAULT_PROVIDER_CATALOG.map((provider) => <option key={provider.key} value={provider.key}>{provider.displayName}</option>)}
+              </select>
+            </label>
+          ) : null}
+          <button
+            className="primary-button"
+            disabled={thumbnailTargetIds.length === 0 || queueingThumbnails}
+            onClick={() => void handleQueueThumbnails()}
+            type="button"
+          >
+            {queueingThumbnails ? 'Adding to queue…' : 'Generate missing thumbnails'}
+          </button>
+        </div>
+        {thumbnailStatus?.active ? (
+          <div className="thumbnail-queue-progress">
+            <div>
+              <strong>{thumbnailStatus.active.handle}</strong>
+              <span className="queue-data">
+                {thumbnailStatus.active.filesProcessed}/{thumbnailStatus.active.filesTotal} processed
+              </span>
+            </div>
+            <div className="queue-status-progress-track">
+              <div className="queue-status-progress-fill" style={{ width: `${thumbnailStatus.active.progressPercent ?? 0}%` }} />
+            </div>
+            <div className="thumbnail-queue-progress-detail">
+              <small className="muted-text">
+                <span className="queue-data">{thumbnailStatus.active.generated}</span> generated · <span className="queue-data">{thumbnailStatus.active.skippedExisting}</span> existing · <span className="queue-data">{thumbnailStatus.active.failed}</span> failed
+              </small>
+              {thumbnailStatus.active.currentFile ? (
+                <small className="thumbnail-current-file" title={thumbnailStatus.active.currentFile}>
+                  {thumbnailStatus.active.currentFile}
+                </small>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <small className="muted-text">
+            {thumbnailStatus?.queuedCount
+              ? `${thumbnailStatus.queuedCount} profile(s) queued`
+              : 'Thumbnail queue is idle.'}
+          </small>
+        )}
+        {thumbnailStatus?.queuedCount ? (
+          <small className="muted-text">{thumbnailStatus.queuedCount} profile(s) waiting</small>
+        ) : null}
+        {thumbnailStatus?.recentResults.length ? (
+          <div className="thumbnail-queue-recent">
+            {thumbnailStatus.recentResults.slice(0, 4).map((result) => (
+              <small key={`${result.sourceId}-${result.finishedAt}`}>
+                <strong>{result.handle}</strong> · <span className="queue-data">{result.generated}</span> generated · <span className="queue-data">{result.skippedExisting}</span> existing · <span className="queue-data">{result.failed}</span> failed
+              </small>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className="queue-status-summary-strip" role="list" aria-label="Queue totals">

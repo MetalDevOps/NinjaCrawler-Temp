@@ -76,6 +76,7 @@ import type {
   SingleVideoQueueStatus,
   SourceMediaGallery,
   MediaGalleryPost,
+  MediaThumbnailQueueStatus,
   SchedulerSet,
   SchedulerGroup,
   SchedulerGroupUpsert,
@@ -2545,6 +2546,8 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
       postId: optionalStringValue(post, ['postId', 'post_id']),
       postUrl: optionalStringValue(post, ['postUrl', 'post_url']),
       capturedAt: optionalNumberValue(post, ['capturedAt', 'captured_at']),
+      downloadedAt: optionalNumberValue(post, ['downloadedAt', 'downloaded_at']),
+      author: optionalStringValue(post, ['author']),
       mediaType: stringValue(post, ['mediaType', 'media_type'], 'image') as MediaGalleryPost['mediaType'],
       section: stringValue(post, ['section'], 'timeline'),
       albums: Array.isArray(post.albums)
@@ -2571,6 +2574,37 @@ export async function loadSourceMediaGallery(sourceId: string): Promise<SourceMe
     buildInvokeArgs({ sourceId }, { source_id: sourceId }),
   )
   return parseSourceMediaGallery(raw, sourceId)
+}
+
+export interface MediaThumbnailBatch {
+  /** false = ffmpeg indisponível; o chamador cai no thumb por <video>. */
+  available: boolean
+  /** caminho absoluto do vídeo → caminho absoluto do jpg em cache. */
+  thumbs: Record<string, string>
+}
+
+export async function loadMediaThumbnails(paths: string[]): Promise<MediaThumbnailBatch> {
+  const raw = await invoke<unknown>('load_media_thumbnails', buildInvokeArgs({ paths }))
+  const value = isRecord(raw) ? raw : {}
+  const thumbs: Record<string, string> = {}
+  const rawThumbs = isRecord(value.thumbs) ? value.thumbs : {}
+  for (const [key, thumb] of Object.entries(rawThumbs)) {
+    if (typeof thumb === 'string' && thumb) thumbs[key] = thumb
+  }
+  return { available: value.available !== false, thumbs }
+}
+
+export async function enqueueMediaThumbnailGeneration(
+  sourceIds: string[],
+): Promise<MediaThumbnailQueueStatus> {
+  return invoke<MediaThumbnailQueueStatus>(
+    'enqueue_media_thumbnail_generation',
+    buildInvokeArgs({ sourceIds }, { source_ids: sourceIds }),
+  )
+}
+
+export async function loadMediaThumbnailQueueStatus(): Promise<MediaThumbnailQueueStatus> {
+  return invoke<MediaThumbnailQueueStatus>('media_thumbnail_queue_status')
 }
 
 export async function openSingleVideosWindow(): Promise<void> {

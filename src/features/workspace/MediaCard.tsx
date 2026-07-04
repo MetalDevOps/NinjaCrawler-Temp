@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { MouseEvent } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 
@@ -55,6 +56,12 @@ export function MediaCard({
   onDelete,
   onContextMenu,
 }: MediaCardProps) {
+  // Guardamos qual caminho falhou (não um boolean): quando o card virtualizado
+  // é reutilizado com outro poster, o novo caminho volta a ser tentado sem
+  // precisar de efeito/setState extra.
+  const [failedPosterPath, setFailedPosterPath] = useState<string>()
+  const usablePoster = posterAbsPath !== failedPosterPath ? posterAbsPath : undefined
+
   return (
     <article
       className={`profile-view-card${selected ? ' is-selected' : ''}${selectMode ? ' is-selecting' : ''}`}
@@ -76,8 +83,13 @@ export function MediaCard({
         type="button"
         title={selectMode ? 'Toggle selection (Shift: range)' : 'Open preview'}
       >
-        {posterAbsPath ? (
-          <img src={convertFileSrc(posterAbsPath)} alt="" loading="lazy" />
+        {usablePoster ? (
+          <img
+            src={convertFileSrc(usablePoster)}
+            alt=""
+            loading="lazy"
+            onError={() => setFailedPosterPath(posterAbsPath)}
+          />
         ) : videoThumbAbsPath ? (
           <video src={convertFileSrc(videoThumbAbsPath)} preload="metadata" muted />
         ) : null}

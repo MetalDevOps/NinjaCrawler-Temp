@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import {
   deleteSourceMedia,
+  loadMediaThumbnails,
   loadSourceMediaGallery,
   loadWorkspaceSnapshot,
   openExternalTarget,
@@ -21,14 +23,25 @@ interface ProfileViewPageProps {
 }
 
 type ViewMode = 'day' | 'grid'
-type SortMode = 'latest' | 'popular' | 'oldest'
 /** Modos de visualização dos Highlights: por álbum (padrão) ou os comuns. */
 type HighlightsMode = 'album' | 'day' | 'grid'
+/** Modos das abas de conteúdo de terceiros (Likes/Favorites): + por autor. */
+type LikesMode = 'day' | 'user' | 'grid'
+/** Modo efetivo de renderização, unindo os três controles acima. */
+type EffectiveMode = 'album' | 'day' | 'grid' | 'user'
+/**
+ * Eixo de ordenação. `creation`/`download` são datas (usadas também no
+ * agrupamento "By day"); `popularity` ordena pela contagem de views (TikTok).
+ */
+type SortField = 'creation' | 'download' | 'popularity'
+type SortDir = 'newest' | 'oldest'
 
 const VIEW_MODE_STORAGE_KEY = 'profileView.mode'
 const HIGHLIGHTS_MODE_STORAGE_KEY = 'profileView.highlightsMode'
+const LIKES_MODE_STORAGE_KEY = 'profileView.likesMode'
 const DENSITY_STORAGE_KEY = 'profileView.density'
-const SORT_MODE_STORAGE_KEY = 'profileView.sortMode'
+const SORT_FIELD_STORAGE_KEY = 'profileView.sortField'
+const SORT_DIR_STORAGE_KEY = 'profileView.sortDir'
 
 /** Seção dos Highlights do Instagram (ver isEphemeralStorySection). */
 const HIGHLIGHTS_SECTION = 'stories'
@@ -55,6 +68,16 @@ function readStoredHighlightsMode(): HighlightsMode {
   return 'album'
 }
 
+function readStoredLikesMode(): LikesMode {
+  try {
+    const stored = localStorage.getItem(LIKES_MODE_STORAGE_KEY)
+    if (stored === 'day' || stored === 'grid') return stored
+  } catch {
+    /* ignore */
+  }
+  return 'user'
+}
+
 function readStoredDensity(): number {
   try {
     const stored = localStorage.getItem(DENSITY_STORAGE_KEY)
@@ -68,14 +91,52 @@ function readStoredDensity(): number {
   return DEFAULT_DENSITY_INDEX
 }
 
-function readStoredSortMode(): SortMode {
+function readStoredSortField(): SortField {
   try {
-    const stored = localStorage.getItem(SORT_MODE_STORAGE_KEY)
-    if (stored === 'popular' || stored === 'oldest') return stored
+    const stored = localStorage.getItem(SORT_FIELD_STORAGE_KEY)
+    if (stored === 'download' || stored === 'popularity') return stored
   } catch {
     /* ignore */
   }
-  return 'latest'
+  return 'creation'
+}
+
+function readStoredSortDir(): SortDir {
+  try {
+    return localStorage.getItem(SORT_DIR_STORAGE_KEY) === 'oldest' ? 'oldest' : 'newest'
+  } catch {
+    return 'newest'
+  }
+}
+
+/**
+ * Timestamp usado no agrupamento "By day". Para `popularity` (sem eixo de
+ * data próprio) cai na data de criação, para que os dias continuem coerentes.
+ */
+function orderTimestamp(post: MediaGalleryPost, field: SortField): number | undefined {
+  return field === 'download' ? post.downloadedAt : post.capturedAt
+}
+
+/** Valor comparado na ordenação: data do eixo escolhido ou views (popularity). */
+function orderValue(post: MediaGalleryPost, field: SortField): number | undefined {
+  if (field === 'popularity') return post.viewCount
+  return orderTimestamp(post, field)
+}
+
+/** Normaliza para busca: minúsculas, sem acentos e sem o `@` inicial. */
+function normalizeForSearch(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase()
+    .trim()
+    .replace(/^@/, '')
+}
+
+/** Autor, nomes dos arquivos e post id pesquisáveis nos Likes/Favorites. */
+function postAuthorSearchText(post: MediaGalleryPost): string {
+  const fileNames = post.files.map((file) => file.relativePath.split('/').pop() ?? '')
+  return [post.author ?? '', post.postId ?? '', ...fileNames].join(' ')
 }
 
 interface FlatItem {
@@ -147,17 +208,32 @@ function isEphemeralStorySection(section: string): boolean {
 const SECTION_FILTER_ALL = 'all'
 
 /** Ordem estável dos chips de seção (feed antes de reels etc.). */
-const SECTION_ORDER = ['timeline', 'reels', 'stories_user', 'stories', 'tagged', 'reposts', 'video']
+const SECTION_ORDER = [
+  'timeline',
+  'reels',
+  'stories_user',
+  'stories',
+  'tagged',
+  'reposts',
+  'video',
+  'favorites',
+  'likes',
+]
+
+/** Seções cujo conteúdo é de OUTROS autores (busca/agrupamento por autor). */
+function isAuthorSection(section: string): boolean {
+  return section === 'likes' || section === 'favorites'
+}
 
 /**
  * Rótulo da seção. No Instagram, `timeline` é o Feed (distinto dos Reels, que
- * são conteúdos diferentes); nos demais providers vira "Posts". Sobre `stories`
- * vs `stories_user`, ver {@link isEphemeralStorySection}.
+ * são conteúdos diferentes); nos demais providers vira "Timeline". Sobre
+ * `stories` vs `stories_user`, ver {@link isEphemeralStorySection}.
  */
 function sectionLabel(provider: ProviderKey, section: string): string {
   switch (section) {
     case 'timeline':
-      return provider === 'instagram' ? 'Feed' : 'Posts'
+      return provider === 'instagram' ? 'Feed' : 'Timeline'
     case 'reels':
       return 'Reels'
     case 'stories':
@@ -184,10 +260,24 @@ function sortSections(sections: string[]): string[] {
   })
 }
 
-// Renderização progressiva: perfis com milhares de itens renderizam por janela,
-// que cresce conforme o usuário rola (evita montar dezenas de milhares de nós).
-const INITIAL_RENDER_LIMIT = 120
-const RENDER_BATCH = 120
+// Virtualização por linhas: perfis com milhares de itens só montam as linhas
+// visíveis (+ overscan), com a altura total reservada — assim a barra de
+// rolagem nativa reflete o volume real e a UI não trava.
+/** Gap do grid (`.profile-view-grid`, 0.55rem @16px) — usado no cálculo de colunas. */
+const GRID_GAP_PX = 8.8
+/** Miniatura tem aspect-ratio 3/4, então altura = largura × 4/3. */
+const THUMB_ASPECT = 4 / 3
+/** Altura estimada do cabeçalho de dia (o measure real ajusta depois). */
+const DAY_HEADER_ESTIMATE = 44
+/** Linhas extras montadas fora da viewport, para rolagem sem flashes. */
+const ROW_OVERSCAN = 3
+/** Quantos thumbnails de vídeo pedir ao backend por lote. */
+const THUMBNAIL_BATCH = 32
+
+/** Uma linha virtual: cabeçalho de grupo (dia/autor) ou uma fileira de cards. */
+type VirtualRow =
+  | { type: 'header'; key: string; label: string; count: number; plain?: boolean }
+  | { type: 'grid'; key: string; posts: MediaGalleryPost[] }
 
 export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [sourceId, setSourceId] = useState<string | undefined>(initialSourceId)
@@ -198,10 +288,19 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [lightboxIndex, setLightboxIndex] = useState<number>()
   const [viewMode, setViewMode] = useState<ViewMode>(readStoredMode)
   const [highlightsMode, setHighlightsMode] = useState<HighlightsMode>(readStoredHighlightsMode)
+  const [likesMode, setLikesMode] = useState<LikesMode>(readStoredLikesMode)
   const [densityIndex, setDensityIndex] = useState<number>(readStoredDensity)
-  const [sortMode, setSortMode] = useState<SortMode>(readStoredSortMode)
+  const [sortField, setSortField] = useState<SortField>(readStoredSortField)
+  const [sortDir, setSortDir] = useState<SortDir>(readStoredSortDir)
+  const [sortMenuOpen, setSortMenuOpen] = useState(false)
+  const sortMenuRef = useRef<HTMLDivElement>(null)
+  // Busca por autor, exclusiva da aba Likes: a lupa expande o campo inline.
+  const [likesSearchOpen, setLikesSearchOpen] = useState(false)
+  const [likesQuery, setLikesQuery] = useState('')
+  const likesSearchInputRef = useRef<HTMLInputElement>(null)
   const [sectionFilter, setSectionFilter] = useState<string>(SECTION_FILTER_ALL)
-  const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT)
+  // Largura útil do container de rolagem (medida), base do cálculo de colunas.
+  const [containerWidth, setContainerWidth] = useState(0)
   const [selectMode, setSelectMode] = useState(false)
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set())
   // Âncora para seleção por intervalo (shift+clique): o último item alternado.
@@ -209,7 +308,6 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [confirmPosts, setConfirmPosts] = useState<MediaGalleryPost[]>()
   const [deleting, setDeleting] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const sentinelRef = useRef<HTMLDivElement>(null)
 
   // Persiste as preferências de visualização.
   useEffect(() => {
@@ -228,6 +326,13 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   }, [highlightsMode])
   useEffect(() => {
     try {
+      localStorage.setItem(LIKES_MODE_STORAGE_KEY, likesMode)
+    } catch {
+      /* ignore */
+    }
+  }, [likesMode])
+  useEffect(() => {
+    try {
       localStorage.setItem(DENSITY_STORAGE_KEY, String(densityIndex))
     } catch {
       /* ignore */
@@ -235,11 +340,34 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   }, [densityIndex])
   useEffect(() => {
     try {
-      localStorage.setItem(SORT_MODE_STORAGE_KEY, sortMode)
+      localStorage.setItem(SORT_FIELD_STORAGE_KEY, sortField)
     } catch {
       /* ignore */
     }
-  }, [sortMode])
+  }, [sortField])
+  useEffect(() => {
+    try {
+      localStorage.setItem(SORT_DIR_STORAGE_KEY, sortDir)
+    } catch {
+      /* ignore */
+    }
+  }, [sortDir])
+
+  // Fecha o menu de ordenação ao clicar fora (mesmo padrão do date picker).
+  useEffect(() => {
+    if (!sortMenuOpen) return undefined
+    const handlePointerDown = (event: PointerEvent) => {
+      if (sortMenuRef.current?.contains(event.target as Node)) return
+      setSortMenuOpen(false)
+    }
+    window.addEventListener('pointerdown', handlePointerDown)
+    return () => window.removeEventListener('pointerdown', handlePointerDown)
+  }, [sortMenuOpen])
+
+  // Foca o campo de busca dos Likes assim que a lupa é expandida.
+  useEffect(() => {
+    if (likesSearchOpen) likesSearchInputRef.current?.focus()
+  }, [likesSearchOpen])
 
   // Reabrir a janela para outro perfil emite o novo sourceId.
   useEffect(() => {
@@ -342,54 +470,58 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
 
   const visiblePosts = useMemo<MediaGalleryPost[]>(() => {
     if (!gallery) return []
-    let filtered: MediaGalleryPost[]
-    if (sectionFilter === SECTION_FILTER_ALL) {
-      filtered = gallery.posts
+    if (sectionFilter === SECTION_FILTER_ALL) return gallery.posts
     // Highlights reúne todos os posts que pertencem a algum álbum (inclusive os
     // que moram no Feed via associação), não só os da seção física `stories`.
-    } else if (sectionFilter === HIGHLIGHTS_SECTION) {
-      filtered = gallery.posts.filter((post) => (post.albums?.length ?? 0) > 0)
-    } else {
-      filtered = gallery.posts.filter((post) => (post.section || 'timeline') === sectionFilter)
+    if (sectionFilter === HIGHLIGHTS_SECTION) {
+      return gallery.posts.filter((post) => (post.albums?.length ?? 0) > 0)
     }
-    return [...filtered].sort((left, right) => {
-      const dateDifference = (right.capturedAt ?? 0) - (left.capturedAt ?? 0)
-      if (sortMode === 'oldest') return -dateDifference
-      if (sortMode === 'popular') {
-        const viewDifference = (right.viewCount ?? -1) - (left.viewCount ?? -1)
-        return viewDifference || dateDifference
-      }
-      return dateDifference
+    return gallery.posts.filter((post) => (post.section || 'timeline') === sectionFilter)
+  }, [gallery, sectionFilter])
+
+  // Conjunto exibido: filtro de seção → busca por autor (só nos Likes) →
+  // ordenação pelo eixo escolhido. Posts sem valor no eixo (ex.: like sem
+  // download registrado, ou vídeo sem views) vão sempre ao fim, independentemente
+  // da direção.
+  const sortedPosts = useMemo<MediaGalleryPost[]>(() => {
+    let base = visiblePosts
+    const query = normalizeForSearch(likesQuery)
+    if (isAuthorSection(sectionFilter) && query) {
+      base = base.filter((post) => normalizeForSearch(postAuthorSearchText(post)).includes(query))
+    }
+    const dir = sortDir === 'oldest' ? 1 : -1
+    return [...base].sort((a, b) => {
+      const va = orderValue(a, sortField)
+      const vb = orderValue(b, sortField)
+      if (va == null && vb == null) return 0
+      if (va == null) return 1
+      if (vb == null) return -1
+      if (va !== vb) return (va - vb) * dir
+      // Empate por popularidade: desempata pela data de criação (mais recente antes).
+      if (sortField === 'popularity') return (b.capturedAt ?? 0) - (a.capturedAt ?? 0)
+      return 0
     })
-  }, [gallery, sectionFilter, sortMode])
+  }, [visiblePosts, sortField, sortDir, sectionFilter, likesQuery])
 
-  // Reinicia a janela ao trocar de perfil ou de filtro (conteúdo diferente).
-  useEffect(() => {
-    setRenderLimit(INITIAL_RENDER_LIMIT)
-  }, [sourceId, sectionFilter, sortMode])
-
-  // Subconjunto efetivamente montado no DOM (a janela cresce no scroll).
-  const renderedPosts = useMemo(
-    () => visiblePosts.slice(0, renderLimit),
-    [visiblePosts, renderLimit],
-  )
-  const hasMoreToRender = renderLimit < visiblePosts.length
-
+  // Agrupa por dia usando Map (não sequencial): quando a ordem não é por data
+  // — ex.: ordenação por popularidade — posts do mesmo dia podem não ser
+  // adjacentes, então indexamos por chave para não duplicar grupos.
   const days = useMemo<DayGroup[]>(() => {
     const groups: DayGroup[] = []
     const byKey = new Map<string, DayGroup>()
-    for (const post of renderedPosts) {
-      const key = dayKey(post.capturedAt)
+    for (const post of sortedPosts) {
+      const ts = orderTimestamp(post, sortField)
+      const key = dayKey(ts)
       let group = byKey.get(key)
       if (!group) {
-        group = { key, label: dayLabel(key, post.capturedAt), posts: [] }
+        group = { key, label: dayLabel(key, ts), posts: [] }
         byKey.set(key, group)
         groups.push(group)
       }
       group.posts.push(post)
     }
     return groups
-  }, [renderedPosts])
+  }, [sortedPosts, sortField])
 
   // Agrupa os Highlights por álbum (subpasta sob `Stories/`). Os posts já vêm
   // do mais recente ao mais antigo, então a 1ª aparição ordena os álbuns pelo
@@ -397,7 +529,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const albums = useMemo<AlbumGroup[]>(() => {
     const groups: AlbumGroup[] = []
     const byKey = new Map<string, AlbumGroup>()
-    for (const post of renderedPosts) {
+    for (const post of sortedPosts) {
       // Um post pode pertencer a vários álbuns → aparece em cada seção.
       const labels = post.albums && post.albums.length > 0 ? post.albums : ['Highlights']
       for (const label of labels) {
@@ -417,7 +549,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       }
     }
     return groups
-  }, [renderedPosts])
+  }, [sortedPosts])
 
   // "By album" só faz sentido nos Highlights; nas demais seções vale o viewMode.
   // Cobre também o perfil que só tem Highlights (sem chip de seção para clicar).
@@ -426,35 +558,172 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     (sectionFilter === SECTION_FILTER_ALL &&
       sections.length === 1 &&
       sections[0] === HIGHLIGHTS_SECTION)
-  const effectiveMode: HighlightsMode = isHighlights ? highlightsMode : viewMode
+  // Likes/Favorites têm o próprio controle (com "By user"); Highlights o seu
+  // ("By album"); o resto usa o viewMode comum.
+  const isAuthorTab = isAuthorSection(sectionFilter)
+  const effectiveMode: EffectiveMode = isHighlights
+    ? highlightsMode
+    : isAuthorTab
+      ? likesMode
+      : viewMode
+  // O modo "By album" (Highlights) tem poucos itens e mantém a renderização
+  // simples; grid, day e user são virtualizados por linha (onde mora o volume).
+  const isVirtualized = effectiveMode !== 'album'
 
-  // Cresce a janela quando o sentinel (fim da lista) entra na viewport. O
-  // rootMargin pré-carrega antes de chegar ao fim; re-observa a cada cresc.
-  // para o caso de um lote não preencher a tela inteira.
+  // Grupos por autor (Likes/Favorites): quem tem mais likes primeiro; dentro
+  // do grupo vale a ordenação corrente. Posts sem autor caem em "Unknown".
+  const userGroups = useMemo<Array<{ key: string; label: string; posts: MediaGalleryPost[] }>>(() => {
+    if (effectiveMode !== 'user') return []
+    const byAuthor = new Map<string, { key: string; label: string; posts: MediaGalleryPost[] }>()
+    for (const post of sortedPosts) {
+      const author = post.author?.trim() ?? ''
+      const key = author ? author.toLowerCase() : ''
+      let group = byAuthor.get(key)
+      if (!group) {
+        group = { key: key || 'unknown', label: author ? `@${author}` : 'Unknown', posts: [] }
+        byAuthor.set(key, group)
+      }
+      group.posts.push(post)
+    }
+    return [...byAuthor.values()].sort((a, b) => b.posts.length - a.posts.length)
+  }, [effectiveMode, sortedPosts])
+
+  // Mede a largura útil do container de rolagem (exclui a barra) para derivar as
+  // colunas. Reage a resize da janela e à (re)montagem do container.
   useEffect(() => {
-    if (!hasMoreToRender) return
-    const sentinel = sentinelRef.current
-    if (!sentinel) return
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setRenderLimit((current) => current + RENDER_BATCH)
-        }
-      },
-      { root: scrollRef.current ?? null, rootMargin: '800px 0px' },
-    )
-    observer.observe(sentinel)
+    const element = scrollRef.current
+    if (!element) return undefined
+    const update = () => setContainerWidth(element.clientWidth)
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
     return () => observer.disconnect()
-  }, [hasMoreToRender, renderLimit, viewMode])
+  }, [gallery])
 
-  // Lista plana (post → cada arquivo) para o lightbox navegar (respeita o filtro).
+  // Colunas e altura da linha, derivadas da largura medida e da densidade. A
+  // fórmula das colunas espelha a do CSS grid `minmax(min, 1fr)` do browser.
+  const gridMetrics = useMemo(() => {
+    const min = DENSITY_STEPS[densityIndex]
+    const width = containerWidth
+    if (width <= 0) return { cols: 1, rowHeight: Math.round(min * THUMB_ASPECT + GRID_GAP_PX) }
+    const cols = Math.max(1, Math.floor((width + GRID_GAP_PX) / (min + GRID_GAP_PX)))
+    const cellWidth = (width - (cols - 1) * GRID_GAP_PX) / cols
+    return { cols, rowHeight: Math.round(cellWidth * THUMB_ASPECT + GRID_GAP_PX) }
+  }, [containerWidth, densityIndex])
+
+  // Achata o conteúdo do modo atual (grid, day ou user) em linhas virtuais.
+  // Nos modos agrupados, cada grupo gera um cabeçalho + N fileiras de cards.
+  const virtualRows = useMemo<VirtualRow[]>(() => {
+    const cols = gridMetrics.cols
+    const rows: VirtualRow[] = []
+    const pushGroup = (key: string, label: string, posts: MediaGalleryPost[], plain?: boolean) => {
+      rows.push({ type: 'header', key: `h-${key}`, label, count: posts.length, plain })
+      for (let i = 0; i < posts.length; i += cols) {
+        rows.push({ type: 'grid', key: `${key}-${i}`, posts: posts.slice(i, i + cols) })
+      }
+    }
+    if (effectiveMode === 'grid') {
+      for (let i = 0; i < sortedPosts.length; i += cols) {
+        rows.push({ type: 'grid', key: `g-${i}`, posts: sortedPosts.slice(i, i + cols) })
+      }
+    } else if (effectiveMode === 'day') {
+      for (const day of days) pushGroup(day.key, day.label, day.posts)
+    } else if (effectiveMode === 'user') {
+      // `plain`: o handle preserva a caixa original (sem o uppercase do .eyebrow).
+      for (const group of userGroups) pushGroup(group.key, group.label, group.posts, true)
+    }
+    return rows
+  }, [effectiveMode, sortedPosts, days, userGroups, gridMetrics.cols])
+
+  const rowVirtualizer = useVirtualizer({
+    count: virtualRows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: (index) =>
+      virtualRows[index]?.type === 'header' ? DAY_HEADER_ESTIMATE : gridMetrics.rowHeight,
+    overscan: ROW_OVERSCAN,
+    getItemKey: (index) => virtualRows[index]?.key ?? index,
+  })
+
+  // Densidade/largura mudam a altura das linhas: descarta as medidas em cache
+  // para o virtualizer re-medir com o novo tamanho.
+  useEffect(() => {
+    rowVirtualizer.measure()
+  }, [rowVirtualizer, gridMetrics.rowHeight, containerWidth])
+
+  // Trocar de perfil ou de seção muda o conteúdo por completo — volta ao topo
+  // (com virtualização o scrollTop não reseta sozinho e ficaria fora do fim).
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = 0
+  }, [sourceId, sectionFilter])
+
+  // Thumbnails de vídeo gerados pelo backend (ffmpeg): o grid nunca monta
+  // <video> quando eles existem — media elements aos milhares travam o webview.
+  // `''` marca falha de geração (não re-pede). Cache por caminho absoluto,
+  // válido entre perfis/abas.
+  const [thumbs, setThumbs] = useState<ReadonlyMap<string, string>>(() => new Map())
+  // ffmpeg ausente → cai no thumb por <video> (gated pelo isScrolling).
+  const [thumbsUnavailable, setThumbsUnavailable] = useState(false)
+  const pendingThumbsRef = useRef<Set<string>>(new Set())
+  const isScrolling = rowVirtualizer.isScrolling
+  const virtualItems = rowVirtualizer.getVirtualItems()
+  const rangeKey = virtualItems.length
+    ? `${virtualItems[0].index}:${virtualItems[virtualItems.length - 1].index}`
+    : ''
+  useEffect(() => {
+    // Durante a rolagem não adianta pedir: a viewport ainda está mudando.
+    if (isScrolling || thumbsUnavailable || !isVirtualized) return
+    const wanted: string[] = []
+    for (const item of rowVirtualizer.getVirtualItems()) {
+      const row = virtualRows[item.index]
+      if (!row || row.type !== 'grid') continue
+      for (const post of row.posts) {
+        const file = post.files[0]
+        if (!file || !isVideo(file.mediaType)) continue
+        if (post.posterPath) continue
+        const key = file.absolutePath
+        if (!thumbs.has(key) && !pendingThumbsRef.current.has(key)) {
+          wanted.push(key)
+          if (wanted.length >= THUMBNAIL_BATCH) break
+        }
+      }
+      if (wanted.length >= THUMBNAIL_BATCH) break
+    }
+    if (wanted.length === 0) return
+    for (const key of wanted) pendingThumbsRef.current.add(key)
+    let cancelled = false
+    void loadMediaThumbnails(wanted)
+      .then((batch) => {
+        for (const key of wanted) pendingThumbsRef.current.delete(key)
+        if (cancelled) return
+        if (!batch.available) {
+          setThumbsUnavailable(true)
+          return
+        }
+        setThumbs((current) => {
+          const next = new Map(current)
+          // Sem resultado = falha de geração → '' impede novo pedido.
+          for (const key of wanted) next.set(key, batch.thumbs[key] ?? '')
+          return next
+        })
+      })
+      .catch(() => {
+        for (const key of wanted) pendingThumbsRef.current.delete(key)
+      })
+    return () => {
+      cancelled = true
+    }
+    // rangeKey cobre o deslocamento da janela; thumbs reagenda o próximo lote.
+  }, [rangeKey, isScrolling, thumbs, thumbsUnavailable, isVirtualized, rowVirtualizer, virtualRows])
+
+  // Lista plana (post → cada arquivo) para o lightbox navegar (respeita filtro
+  // e ordenação, para o avançar/voltar seguir a ordem exibida).
   const flatItems = useMemo<FlatItem[]>(() => {
     const items: FlatItem[] = []
-    for (const post of visiblePosts) {
+    for (const post of sortedPosts) {
       post.files.forEach((file, fileIndex) => items.push({ file, post, fileIndex }))
     }
     return items
-  }, [visiblePosts])
+  }, [sortedPosts])
 
   const firstFlatIndexByPost = useMemo(() => {
     const map = new Map<MediaGalleryPost, number>()
@@ -489,6 +758,44 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     [flatItems.length],
   )
 
+  // A lista encolheu (exclusão/refresh) e o índice estourou: gruda no último
+  // item ou fecha quando não sobrou nada.
+  useEffect(() => {
+    if (lightboxIndex !== undefined && lightboxIndex >= flatItems.length) {
+      setLightboxIndex(flatItems.length > 0 ? flatItems.length - 1 : undefined)
+    }
+  }, [flatItems.length, lightboxIndex])
+
+  /**
+   * Shift+Del no lightbox: manda o post ativo para a Lixeira SEM diálogo (o
+   * Shift é a confirmação) — o backend também o marca como excluído no ledger
+   * para nunca ser baixado de novo. O índice reancora no 1º arquivo do post,
+   * então após a exclusão a mesma posição exibe o item seguinte.
+   */
+  const deleteActivePost = useCallback(async () => {
+    if (!sourceId || deleting || lightboxIndex === undefined) return
+    const item = flatItems[lightboxIndex]
+    if (!item) return
+    const anchor = firstFlatIndexByPost.get(item.post) ?? lightboxIndex
+    setDeleting(true)
+    setError(undefined)
+    try {
+      const next = await deleteSourceMedia(
+        sourceId,
+        item.post.files.map((file) => file.relativePath),
+      )
+      setGallery(next)
+      setLightboxIndex(anchor)
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Failed to delete media.')
+    } finally {
+      setDeleting(false)
+    }
+  }, [sourceId, deleting, lightboxIndex, flatItems, firstFlatIndexByPost])
+  // Ref para o listener de teclado (estável) sempre ver a versão corrente.
+  const deleteActivePostRef = useRef(deleteActivePost)
+  deleteActivePostRef.current = deleteActivePost
+
   // Teclado no lightbox (captura para ter prioridade sobre o Escape global).
   const lightboxOpen = lightboxIndex !== undefined
   const lightboxOpenRef = useRef(lightboxOpen)
@@ -503,6 +810,9 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         stepLightbox(-1)
       } else if (event.key === 'ArrowRight') {
         stepLightbox(1)
+      } else if (event.key === 'Delete' && event.shiftKey) {
+        event.preventDefault()
+        void deleteActivePostRef.current()
       }
     }
     document.addEventListener('keydown', handler, true)
@@ -514,19 +824,22 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     if (url) void openExternalTarget(url)
   }, [])
 
-  // Sai do modo seleção / limpa ao trocar de perfil ou de filtro.
+  // Sai do modo seleção / limpa ao trocar de perfil ou de filtro. A busca por
+  // autor também é zerada (ela só existe na aba Likes).
   useEffect(() => {
     setSelectMode(false)
     setSelectedKeys(new Set())
     selectAnchorRef.current = null
+    setLikesSearchOpen(false)
+    setLikesQuery('')
   }, [sourceId, sectionFilter])
 
   // Índice de cada post visível (na ordem exibida) para o range do shift+clique.
   const indexByKey = useMemo(() => {
     const map = new Map<string, number>()
-    visiblePosts.forEach((post, index) => map.set(postKey(post), index))
+    sortedPosts.forEach((post, index) => map.set(postKey(post), index))
     return map
-  }, [visiblePosts])
+  }, [sortedPosts])
 
   /**
    * Seleciona/alterna um post. Marcar qualquer item entra automaticamente no
@@ -545,7 +858,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           const b = indexByKey.get(key)!
           const [lo, hi] = a <= b ? [a, b] : [b, a]
           for (let i = lo; i <= hi; i++) {
-            next.add(postKey(visiblePosts[i]))
+            next.add(postKey(sortedPosts[i]))
           }
           return next
         }
@@ -556,7 +869,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       // O shift estende a partir da âncora existente; o clique simples redefine-a.
       if (!shiftKey) selectAnchorRef.current = key
     },
-    [indexByKey, visiblePosts],
+    [indexByKey, sortedPosts],
   )
 
   const exitSelectMode = useCallback(() => {
@@ -566,8 +879,8 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   }, [])
 
   const selectedPosts = useMemo(
-    () => visiblePosts.filter((post) => selectedKeys.has(postKey(post))),
-    [visiblePosts, selectedKeys],
+    () => sortedPosts.filter((post) => selectedKeys.has(postKey(post))),
+    [sortedPosts, selectedKeys],
   )
 
   const performDelete = useCallback(async () => {
@@ -589,19 +902,38 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
 
   const totalMedia = gallery?.posts.reduce((sum, post) => sum + post.files.length, 0) ?? 0
   const activeItem = lightboxIndex !== undefined ? flatItems[lightboxIndex] : undefined
+  // Album (não virtualizado) usa colunas auto-fill; o grid virtualizado fixa o
+  // número de colunas (`--pv-cols`) para todas as linhas ficarem alinhadas.
   const gridStyle = { '--pv-thumb-min': `${DENSITY_STEPS[densityIndex]}px` } as CSSProperties
+  const virtualGridStyle = {
+    '--pv-thumb-min': `${DENSITY_STEPS[densityIndex]}px`,
+    '--pv-cols': gridMetrics.cols,
+  } as CSSProperties
 
   const renderCard = (post: MediaGalleryPost, key: string) => {
     const thumb = post.files[0]
     if (!thumb) return null
-    const posterSrc = post.posterPath ?? (isVideo(thumb.mediaType) ? undefined : thumb.absolutePath)
+    const thumbIsVideo = isVideo(thumb.mediaType)
+    // Poster: cover em disco > jpg gerado pelo ffmpeg > (foto) o próprio arquivo.
+    const generatedThumb = thumbIsVideo ? thumbs.get(thumb.absolutePath) : undefined
+    const posterSrc =
+      post.posterPath ?? (thumbIsVideo ? generatedThumb || undefined : thumb.absolutePath)
+    // O <video> como thumb é o último recurso (ffmpeg indisponível) e nunca
+    // monta durante a rolagem — media elements em massa travam o webview. O
+    // modo álbum (Highlights, poucos itens, fora do virtualizer/efeito de
+    // thumbs) mantém o comportamento antigo.
+    const allowVideoThumb = !isVirtualized || (thumbsUnavailable && !isScrolling)
     const video = isVideo(post.mediaType === 'video' ? 'video' : thumb.mediaType)
     const selected = selectedKeys.has(postKey(post))
     return (
       <MediaCard
         key={key}
         posterAbsPath={posterSrc}
-        videoThumbAbsPath={thumb.absolutePath}
+        // Se um jpg derivado estiver corrompido/inacessível, o MediaCard cai
+        // para o próprio vídeo apenas naquele card; não deixa ícone quebrado.
+        videoThumbAbsPath={
+          allowVideoThumb || Boolean(generatedThumb) ? thumb.absolutePath : undefined
+        }
         isVideo={video}
         slideshowCount={post.mediaType === 'slideshow' ? post.files.length : undefined}
         badge={
@@ -692,9 +1024,9 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
               <span className="profile-view-selectbar-spacer" />
               <button
                 className="ghost-button queue-icon-button"
-                onClick={() => setSelectedKeys(new Set(visiblePosts.map(postKey)))}
+                onClick={() => setSelectedKeys(new Set(sortedPosts.map(postKey)))}
                 type="button"
-                disabled={visiblePosts.length === 0 || selectedPosts.length === visiblePosts.length}
+                disabled={sortedPosts.length === 0 || selectedPosts.length === sortedPosts.length}
               >
                 Select all
               </button>
@@ -756,6 +1088,35 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                       All media
                     </button>
                   </>
+                ) : isAuthorTab ? (
+                  // Likes/Favorites: agrupamento por autor disponível (padrão),
+                  // preferência própria — não mexe no modo das outras abas.
+                  <>
+                    <button
+                      className={likesMode === 'user' ? 'is-active' : ''}
+                      onClick={() => setLikesMode('user')}
+                      type="button"
+                      aria-pressed={likesMode === 'user'}
+                    >
+                      By user
+                    </button>
+                    <button
+                      className={likesMode === 'day' ? 'is-active' : ''}
+                      onClick={() => setLikesMode('day')}
+                      type="button"
+                      aria-pressed={likesMode === 'day'}
+                    >
+                      By day
+                    </button>
+                    <button
+                      className={likesMode === 'grid' ? 'is-active' : ''}
+                      onClick={() => setLikesMode('grid')}
+                      type="button"
+                      aria-pressed={likesMode === 'grid'}
+                    >
+                      All media
+                    </button>
+                  </>
                 ) : (
                   <>
                     <button
@@ -800,16 +1161,153 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   ))}
                 </div>
               ) : null}
-              <select
-                aria-label="Sort media by"
-                className="workspace-toolbar-select"
-                onChange={(event) => setSortMode(event.target.value as SortMode)}
-                value={sortMode}
-              >
-                <option value="latest">Latest</option>
-                <option value="popular">Popular</option>
-                <option value="oldest">Oldest</option>
-              </select>
+              {isAuthorSection(sectionFilter) ? (
+                <div className={`profile-view-search${likesSearchOpen ? ' is-open' : ''}`}>
+                  {likesSearchOpen ? (
+                    <>
+                      <svg
+                        className="profile-view-search-icon"
+                        viewBox="0 0 24 24"
+                        width="15"
+                        height="15"
+                        aria-hidden="true"
+                        focusable="false"
+                      >
+                        <circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" strokeWidth="1.8" />
+                        <path d="M20 20l-4.2-4.2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                      </svg>
+                      <input
+                        ref={likesSearchInputRef}
+                        className="profile-view-search-input"
+                        type="search"
+                        value={likesQuery}
+                        placeholder="Search by author…"
+                        onChange={(event) => setLikesQuery(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Escape') {
+                            setLikesQuery('')
+                            setLikesSearchOpen(false)
+                          }
+                        }}
+                        aria-label="Search likes by author"
+                      />
+                      <button
+                        className="ghost-button queue-icon-button profile-view-search-clear"
+                        onClick={() => {
+                          setLikesQuery('')
+                          setLikesSearchOpen(false)
+                        }}
+                        type="button"
+                        aria-label="Close author search"
+                        title="Close search"
+                      >
+                        ×
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      className="ghost-button queue-icon-button profile-view-search-toggle"
+                      onClick={() => setLikesSearchOpen(true)}
+                      type="button"
+                      aria-label="Search likes by author"
+                      title="Search by author"
+                    >
+                      <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                        <circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" strokeWidth="1.8" />
+                        <path d="M20 20l-4.2-4.2" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              ) : null}
+              <div className="profile-view-sort" ref={sortMenuRef}>
+                <button
+                  className="ghost-button queue-icon-button profile-view-sort-toggle"
+                  onClick={() => setSortMenuOpen((open) => !open)}
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded={sortMenuOpen}
+                  aria-label="Sort order"
+                  title="Sort order"
+                >
+                  <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                    <path
+                      d="M8 4v16M4.5 16.5 8 20l3.5-3.5M16 20V4M12.5 7.5 16 4l3.5 3.5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+                {sortMenuOpen ? (
+                  <div className="profile-view-sort-menu" role="menu">
+                    <span className="profile-view-sort-group">Sort by</span>
+                    <button
+                      className="menu-item profile-view-sort-item"
+                      role="menuitemradio"
+                      aria-checked={sortField === 'creation'}
+                      onClick={() => setSortField('creation')}
+                      type="button"
+                    >
+                      <span className="profile-view-sort-check" aria-hidden="true">
+                        {sortField === 'creation' ? '✓' : ''}
+                      </span>
+                      Creation date
+                    </button>
+                    <button
+                      className="menu-item profile-view-sort-item"
+                      role="menuitemradio"
+                      aria-checked={sortField === 'download'}
+                      onClick={() => setSortField('download')}
+                      type="button"
+                    >
+                      <span className="profile-view-sort-check" aria-hidden="true">
+                        {sortField === 'download' ? '✓' : ''}
+                      </span>
+                      Download date
+                    </button>
+                    <button
+                      className="menu-item profile-view-sort-item"
+                      role="menuitemradio"
+                      aria-checked={sortField === 'popularity'}
+                      onClick={() => setSortField('popularity')}
+                      type="button"
+                    >
+                      <span className="profile-view-sort-check" aria-hidden="true">
+                        {sortField === 'popularity' ? '✓' : ''}
+                      </span>
+                      Popularity
+                    </button>
+                    <div className="profile-view-sort-divider" role="separator" />
+                    <button
+                      className="menu-item profile-view-sort-item"
+                      role="menuitemradio"
+                      aria-checked={sortDir === 'newest'}
+                      onClick={() => setSortDir('newest')}
+                      type="button"
+                    >
+                      <span className="profile-view-sort-check" aria-hidden="true">
+                        {sortDir === 'newest' ? '✓' : ''}
+                      </span>
+                      {sortField === 'popularity' ? 'Most viewed first' : 'Newest first'}
+                    </button>
+                    <button
+                      className="menu-item profile-view-sort-item"
+                      role="menuitemradio"
+                      aria-checked={sortDir === 'oldest'}
+                      onClick={() => setSortDir('oldest')}
+                      type="button"
+                    >
+                      <span className="profile-view-sort-check" aria-hidden="true">
+                        {sortDir === 'oldest' ? '✓' : ''}
+                      </span>
+                      {sortField === 'popularity' ? 'Least viewed first' : 'Oldest first'}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
               <div className="profile-view-density" role="group" aria-label="Thumbnail size">
                 <button
                   className="ghost-button queue-icon-button"
@@ -853,7 +1351,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
         <div className="runtime-log-window-empty">No downloaded media found for this profile.</div>
       ) : (
         <div className="profile-view-days" ref={scrollRef}>
-          {effectiveMode === 'album' ? (
+          {!isVirtualized ? (
             albums.map((album) => (
               <section className="profile-view-day profile-view-album" key={album.key}>
                 <div className="profile-view-day-header profile-view-album-header">
@@ -868,26 +1366,41 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                 </div>
               </section>
             ))
-          ) : effectiveMode === 'grid' ? (
-            <div className="profile-view-grid" style={gridStyle}>
-              {renderedPosts.map((post, index) => renderCard(post, post.postId ?? `post-${index}`))}
-            </div>
           ) : (
-            days.map((day) => (
-              <section className="profile-view-day" key={day.key}>
-                <div className="profile-view-day-header">
-                  <span className="eyebrow">{day.label}</span>
-                  <span className="pill">{day.posts.length}</span>
-                </div>
-                <div className="profile-view-grid" style={gridStyle}>
-                  {day.posts.map((post, index) => renderCard(post, post.postId ?? `${day.key}-${index}`))}
-                </div>
-              </section>
-            ))
+            // Grid e "By day" virtualizados: só as linhas visíveis (+ overscan)
+            // são montadas; a altura total é reservada para a barra ser fiel.
+            <div
+              className="profile-view-virtual"
+              style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+            >
+              {rowVirtualizer.getVirtualItems().map((virtualItem) => {
+                const row = virtualRows[virtualItem.index]
+                if (!row) return null
+                return (
+                  <div
+                    key={row.key}
+                    className="profile-view-virtual-row"
+                    data-index={virtualItem.index}
+                    ref={rowVirtualizer.measureElement}
+                    style={{ transform: `translateY(${virtualItem.start}px)` }}
+                  >
+                    {row.type === 'header' ? (
+                      <div className="profile-view-day-header">
+                        <span className={row.plain ? 'eyebrow profile-view-user-title' : 'eyebrow'}>
+                          {row.label}
+                        </span>
+                        <span className="pill">{row.count}</span>
+                      </div>
+                    ) : (
+                      <div className="profile-view-grid profile-view-grid-virtual" style={virtualGridStyle}>
+                        {row.posts.map((post) => renderCard(post, postKey(post)))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
           )}
-          {hasMoreToRender ? (
-            <div ref={sentinelRef} className="profile-view-sentinel" aria-hidden="true" />
-          ) : null}
         </div>
       )}
 
@@ -945,6 +1458,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           onPrev={() => stepLightbox(-1)}
           onNext={() => stepLightbox(1)}
           onClose={closeLightbox}
+          title={activeItem.post.author ? `@${activeItem.post.author}` : gallery?.handle}
           actions={
             <>
               {isEphemeralStorySection(activeItem.post.section) ? null : (

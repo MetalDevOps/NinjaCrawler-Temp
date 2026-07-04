@@ -27,16 +27,17 @@ use crate::domain::models::{
     ImportRunProfileResult, ImportRunRequest, ImportRunResult,
     InstagramExtractImageFromVideoSections, InstagramNamingLedgerBackfillResult,
     InstagramSourceSyncOptions, InstagramSyncOptionsPatch, MediaGalleryFile, MediaGalleryPost,
-    MoveSyncPlanInput, ProviderAccount, ProviderAccountCookie, ProviderAccountCookieImport,
-    ProviderAccountEditor, ProviderAccountImportState, ProviderAccountSession,
-    ProviderAccountSettingValue, ProviderAccountSettingValueKind, ProviderAccountUpsert,
-    RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry, RuntimeLogQuery, SchedulerGroup,
-    SchedulerGroupUpsert, SchedulerPlanCriteria, SchedulerPlanNotifications, SchedulerSet,
-    SchedulerSetUpsert, SetSyncPlanPauseInput, SingleVideo, SkipSyncPlanInput,
-    SourceAvailabilityCheckItem, SourceAvailabilityCheckResult, SourceMediaGallery, SourceProfile,
-    SourceProfileDeleteMode, SourceProfileUpsert, SourceSyncOptions, SourceSyncRun, SyncPlan,
-    SyncPlanRun, SyncPlanTargetPreview, SyncPlanTargetPreviewInput, SyncPlanTargetPreviewSource,
-    SyncPlanUpsert, TikTokSourceSyncOptions, TwitterSourceSyncOptions, WorkspaceSnapshot,
+    MediaThumbnailBatch, MoveSyncPlanInput, ProviderAccount, ProviderAccountCookie,
+    ProviderAccountCookieImport, ProviderAccountEditor, ProviderAccountImportState,
+    ProviderAccountSession, ProviderAccountSettingValue, ProviderAccountSettingValueKind,
+    ProviderAccountUpsert, RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry,
+    RuntimeLogQuery, SchedulerGroup, SchedulerGroupUpsert, SchedulerPlanCriteria,
+    SchedulerPlanNotifications, SchedulerSet, SchedulerSetUpsert, SetSyncPlanPauseInput,
+    SingleVideo, SkipSyncPlanInput, SourceAvailabilityCheckItem, SourceAvailabilityCheckResult,
+    SourceMediaGallery, SourceProfile, SourceProfileDeleteMode, SourceProfileUpsert,
+    SourceSyncOptions, SourceSyncRun, SyncPlan, SyncPlanRun, SyncPlanTargetPreview,
+    SyncPlanTargetPreviewInput, SyncPlanTargetPreviewSource, SyncPlanUpsert,
+    TikTokSourceSyncOptions, TwitterSourceSyncOptions, WorkspaceSnapshot,
 };
 use crate::infrastructure::storage::StorageLayout;
 use crate::infrastructure::{
@@ -2142,6 +2143,11 @@ fn derive_post_metadata(
 struct GalleryPostAcc {
     post_id: Option<String>,
     captured_at: Option<i64>,
+    /// Menor download time (unix) entre os arquivos do post — o momento em que
+    /// o post começou a ser baixado. Preferido do ledger, com fallback mtime.
+    downloaded_at: Option<i64>,
+    /// Autor original (só nos Likes do TikTok); ver `derive_like_author`.
+    author: Option<String>,
     media_type: String,
     section: String,
     /// Highlight album (subpasta sob `Stories/`), quando o post for um highlight.
@@ -2166,6 +2172,9 @@ struct GalleryMediaLedgerLink {
     post_code: Option<String>,
     section: Option<String>,
     captured_at: Option<i64>,
+    /// `first_seen_at` do ledger em unix — quando o app baixou/viu a mídia
+    /// pela 1ª vez. Serve de eixo "Download Date" na ordenação.
+    downloaded_at: Option<i64>,
 }
 
 #[derive(Default, Clone)]
@@ -2241,6 +2250,7 @@ fn load_gallery_media_ledger_links(
                             post_code,
                             section,
                             captured_at: None,
+                            downloaded_at: None,
                         },
                     );
                 }
@@ -2262,7 +2272,7 @@ fn load_gallery_media_ledger_links(
     }
 
     let Ok(mut statement) = connection.prepare(
-        "SELECT relative_path, media_section, provider_post_key, captured_at
+        "SELECT relative_path, media_section, provider_post_key, captured_at, first_seen_at
          FROM provider_sync_media_ledger WHERE provider = ?1 AND source_id = ?2",
     ) else {
         return links;
@@ -2273,11 +2283,12 @@ fn load_gallery_media_ledger_links(
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<String>>(4)?,
         ))
     });
     if let Ok(rows) = rows {
         for row in rows.flatten() {
-            let (relative_path, section, post_key, captured_at) = row;
+            let (relative_path, section, post_key, captured_at, first_seen_at) = row;
             links.insert(
                 relative_path.to_ascii_lowercase(),
                 GalleryMediaLedgerLink {
@@ -2285,11 +2296,77 @@ fn load_gallery_media_ledger_links(
                     post_code: None,
                     section,
                     captured_at,
+                    downloaded_at: first_seen_at.as_deref().and_then(parse_rfc3339_unix),
                 },
             );
         }
     }
     links
+}
+
+/// Converte um timestamp RFC3339 (como os `first_seen_at`/`last_seen_at` dos
+/// ledgers) em unix seconds. Retorna `None` quando o valor não é parseável.
+fn parse_rfc3339_unix(value: &str) -> Option<i64> {
+    parse_rfc3339_utc(value.trim()).map(|dt| dt.timestamp())
+}
+
+/// Map `basename (lowercased) → autor` dos likes do TikTok. A pasta de likes
+/// guarda o vídeo de outra pessoa (`<uploader>_<videoId>.<ext>`); o autor real
+/// vive no `account_sync_media_ledger` (sync_scope `liked_videos`), cujo
+/// `relative_path` é só o nome do arquivo. Vazio para outros providers.
+fn load_tiktok_like_authors(connection: &Connection, provider: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if !provider.eq_ignore_ascii_case("tiktok") {
+        return map;
+    }
+    let Ok(mut statement) = connection.prepare(
+        "SELECT relative_path, source_handle FROM account_sync_media_ledger
+         WHERE provider = 'tiktok' AND sync_scope = 'liked_videos'",
+    ) else {
+        return map;
+    };
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    });
+    if let Ok(rows) = rows {
+        for (relative_path, handle) in rows.flatten() {
+            let handle = handle.trim();
+            if handle.is_empty() {
+                continue;
+            }
+            let basename = relative_path
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&relative_path);
+            map.insert(basename.to_ascii_lowercase(), handle.to_string());
+        }
+    }
+    map
+}
+
+/// Autor de um like/favorito a partir do nome do arquivo — fallback quando o
+/// `account_sync_media_ledger` não tem a linha (import antigo / slideshow).
+/// Cobre o naming do yt-dlp (`<uploader>_<videoId>.<ext>`) e o do 4K Tokkit
+/// (`<uploader>_<unix>_<videoId>[_index_<i>_<n>].<ext>`): o autor são os
+/// tokens antes do id do post, descartando o token unix (9-11 dígitos).
+fn derive_like_author(file_name: &str, post_id: Option<&str>) -> Option<String> {
+    let stem = file_name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(file_name);
+    let post_id = post_id?;
+    let tokens: Vec<&str> = stem.split('_').collect();
+    let id_index = tokens.iter().position(|token| *token == post_id)?;
+    let mut author_tokens = &tokens[..id_index];
+    // Descarta o token unix do Tokkit imediatamente antes do id.
+    if let Some((last, rest)) = author_tokens.split_last() {
+        if (9..=11).contains(&last.len()) && last.chars().all(|c| c.is_ascii_digit()) {
+            author_tokens = rest;
+        }
+    }
+    let author = author_tokens.join("_");
+    let author = author.trim();
+    (!author.is_empty()).then(|| author.to_string())
 }
 
 /// Lista a mídia baixada de um perfil agrupada por post, com o link original
@@ -2347,6 +2424,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
         // merges shortcodes read from the legacy SCrawler XML.
         let ledger_links =
             load_gallery_media_ledger_links(connection, &provider, &source_id, &profile_root);
+        // Autor real dos likes do TikTok (basename → @autor). Vazio nos demais.
+        let like_authors = load_tiktok_like_authors(connection, &provider);
         let post_stats = load_gallery_post_stats(connection, &provider, &source_id);
         // Twitter has no status id in the file name and older media ledger rows
         // predate the post-key column, so pair files with their tweet id via the
@@ -2414,8 +2493,15 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 continue;
             };
             // Seção: subpasta conhecida (Stories/Reposts/Video) ou "timeline".
+            // A pasta física dos likes do TikTok é `Liked/` (nova) ou `Likes/`
+            // (legacy); sem linha no ledger (reimport/mídia antiga) o link não
+            // é resolvido, então classifica direto aqui para o filtro "Likes"
+            // não vazar em "Timeline". Com ledger, `ledger_section` prevalece.
+            // `Favorites/` (4K Tokkit) também é conteúdo de terceiros — seção
+            // própria em vez de inflar a Timeline.
             let section = match top_segment.as_str() {
-                "stories" | "reposts" | "video" => top_segment.clone(),
+                "stories" | "reposts" | "video" | "favorites" => top_segment.clone(),
+                "liked" | "likes" => "likes".to_string(),
                 _ => "timeline".to_string(),
             };
             // Highlights ficam em `Stories/<álbum>/arquivo` — o 2º segmento é o
@@ -2434,6 +2520,24 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
             let link = ledger_links
                 .get(&relative_path.to_ascii_lowercase())
                 .cloned();
+            // Download time do arquivo: `first_seen_at` do ledger, senão o mtime.
+            let file_downloaded_at = link
+                .as_ref()
+                .and_then(|entry| entry.downloaded_at)
+                .or(mtime_unix);
+            // Autor real do like (map por basename do `account_sync_media_ledger`);
+            // fallback no nome do arquivo quando não há linha no ledger. Vale
+            // também para Favorites — igualmente conteúdo de outros autores.
+            let author = like_authors
+                .get(&file_name.to_ascii_lowercase())
+                .cloned()
+                .or_else(|| {
+                    if section == "likes" || section == "favorites" {
+                        derive_like_author(file_name, derived.post_id.as_deref())
+                    } else {
+                        None
+                    }
+                });
             // Instagram: agrupa o carrossel pelo shortcode — todas as fotos do
             // post compartilham o mesmo code, então viram UM card (slideshow).
             // Sem code (mídia antiga sem link), cai para o id derivado do nome.
@@ -2457,6 +2561,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 GalleryPostAcc {
                     post_id: derived.post_id.clone(),
                     captured_at: derived.captured_at,
+                    downloaded_at: file_downloaded_at,
+                    author: author.clone(),
                     media_type: derived.media_type.to_string(),
                     section,
                     album,
@@ -2483,6 +2589,14 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
             }
             if entry.captured_at.is_none() {
                 entry.captured_at = derived.captured_at;
+            }
+            // Download time do post = o mais antigo entre seus arquivos.
+            if let Some(dl) = file_downloaded_at {
+                entry.downloaded_at =
+                    Some(entry.downloaded_at.map_or(dl, |current| current.min(dl)));
+            }
+            if entry.author.is_none() {
+                entry.author = author;
             }
             if entry.media_type == "image" && derived.media_type == "video" {
                 entry.media_type = "video".to_string();
@@ -2590,6 +2704,8 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                     post_id: acc.post_id,
                     post_url,
                     captured_at,
+                    downloaded_at: acc.downloaded_at,
+                    author: acc.author,
                     media_type,
                     section,
                     albums,
@@ -2614,6 +2730,206 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
             posts,
         })
     })
+}
+
+/// ffmpeg disponível? Checado uma vez por processo (`ffmpeg -version`).
+fn ffmpeg_available() -> bool {
+    static FFMPEG_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FFMPEG_AVAILABLE.get_or_init(|| {
+        let mut command = Command::new("ffmpeg");
+        configure_background_command(&mut command);
+        command
+            .arg("-version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
+}
+
+/// Gera (ou reaproveita) thumbnails jpg para os vídeos pedidos. O
+/// grid do Profile View usa `<img>` no lugar de `<video preload=metadata>` —
+/// milhares de media elements montados/desmontados no scroll travam o webview
+/// (limite de ~75 por página no Chromium). Cada jpg fica em `.thumbs/` ao lado
+/// da mídia de origem, no mesmo volume — nunca ocupa silenciosamente o disco C.
+pub fn load_media_thumbnails(paths: Vec<String>) -> Result<MediaThumbnailBatch, String> {
+    // Remove o cache experimental da implementação anterior. É totalmente
+    // regenerável e o usuário não deve ficar com uma cópia órfã no disco C.
+    if let Ok(layout) = storage::ensure_workspace_layout() {
+        let _ = fs::remove_dir_all(layout.cache_root.join("video-thumbs"));
+    }
+    if !ffmpeg_available() {
+        return Ok(MediaThumbnailBatch {
+            available: false,
+            thumbs: HashMap::new(),
+        });
+    }
+    // ffmpeg é o gargalo (~100-300ms por frame): reparte o lote entre alguns
+    // workers para o primeiro paint da viewport não esperar a fila inteira.
+    const THUMBNAIL_WORKERS: usize = 4;
+    let chunk_size = paths.len().div_ceil(THUMBNAIL_WORKERS).max(1);
+    let mut thumbs = HashMap::new();
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = paths
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|path| {
+                            ensure_video_thumbnail(Path::new(path))
+                                .map(|thumb| (path.clone(), thumb))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for worker in workers {
+            if let Ok(results) = worker.join() {
+                thumbs.extend(results);
+            }
+        }
+    });
+    Ok(MediaThumbnailBatch {
+        available: true,
+        thumbs,
+    })
+}
+
+/// Backfill assíncrono usado depois de um sync: novos downloads já saem com
+/// thumbnail, e instalações existentes migram gradualmente sem ocupar o C:.
+pub fn prewarm_source_media_thumbnails(source_id: String) -> Result<usize, String> {
+    static PREWARM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = PREWARM_LOCK
+        .lock()
+        .map_err(|_| "Media thumbnail prewarm lock is poisoned.".to_string())?;
+    let gallery = load_source_media_gallery(source_id)?;
+    let mut paths: Vec<String> = gallery
+        .posts
+        .into_iter()
+        .flat_map(|post| post.files)
+        .filter(|file| file.media_type == "video")
+        .map(|file| file.absolute_path)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let requested = paths.len();
+    let _ = load_media_thumbnails(paths)?;
+    Ok(requested)
+}
+
+pub fn media_thumbnail_source_seed(source_id: &str) -> Result<(String, String), String> {
+    with_workspace(|connection, _| {
+        connection
+            .query_row(
+                "SELECT provider, handle FROM source_profiles
+                 WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
+                params![source_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Source '{source_id}' does not exist."))
+    })
+}
+
+pub fn media_thumbnail_video_paths(source_id: &str) -> Result<Vec<String>, String> {
+    let gallery = load_source_media_gallery(source_id.to_string())?;
+    let mut paths: Vec<String> = gallery
+        .posts
+        .into_iter()
+        .flat_map(|post| post.files)
+        .filter(|file| file.media_type == "video")
+        .map(|file| file.absolute_path)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn video_thumbnail_path(source: &Path) -> Option<PathBuf> {
+    let media_dir = source.parent()?;
+    let source_name = source.file_name()?.to_string_lossy();
+    Some(media_dir.join(".thumbs").join(format!("{source_name}.jpg")))
+}
+
+/// Devolve `<media-dir>/.thumbs/<arquivo>.<ext>.jpg`, gerando-o com ffmpeg se
+/// necessário. O mtime invalida o jpg quando o vídeo de origem é substituído.
+/// Retorna `None` quando o arquivo sumiu ou o ffmpeg não conseguiu decodificar.
+pub(crate) fn media_thumbnail_is_current(source: &Path) -> bool {
+    let Some(output) = video_thumbnail_path(source) else {
+        return false;
+    };
+    let source_mtime = fs::metadata(source).and_then(|meta| meta.modified()).ok();
+    fs::metadata(output)
+        .ok()
+        .filter(|thumb| thumb.len() > 0)
+        .and_then(|thumb| thumb.modified().ok())
+        .zip(source_mtime)
+        .is_some_and(|(thumb_mtime, media_mtime)| thumb_mtime >= media_mtime)
+}
+
+pub(crate) fn ensure_video_thumbnail(source: &Path) -> Option<String> {
+    fs::metadata(source).ok()?;
+    let output = video_thumbnail_path(source)?;
+    let thumbs_dir = output.parent()?;
+    fs::create_dir_all(&thumbs_dir).ok()?;
+    let source_name = source.file_name()?.to_string_lossy();
+    if media_thumbnail_is_current(source) {
+        return Some(output.to_string_lossy().to_string());
+    }
+    let _ = fs::remove_file(&output);
+
+    static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_output = thumbs_dir.join(format!(
+        ".{source_name}.{}.{}.tmp.jpg",
+        std::process::id(),
+        sequence
+    ));
+    // -ss antes do -i (seek rápido); vídeos mais curtos que o seek não emitem
+    // frame algum, então tenta 1s e cai para o 1º frame.
+    for seek in ["1", "0"] {
+        let mut command = Command::new("ffmpeg");
+        configure_background_command(&mut command);
+        let result = command
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-y")
+            .arg("-ss")
+            .arg(seek)
+            .arg("-i")
+            .arg(source)
+            .arg("-frames:v")
+            .arg("1")
+            .arg("-vf")
+            .arg("scale=min(480\\,iw):-2")
+            .arg("-q:v")
+            .arg("4")
+            .arg(&temp_output)
+            .output();
+        let ok = result.map(|out| out.status.success()).unwrap_or(false);
+        if ok
+            && fs::metadata(&temp_output)
+                .map(|meta| meta.len() > 0)
+                .unwrap_or(false)
+        {
+            // Outra geração concorrente pode ter vencido; qualquer jpg completo
+            // é equivalente para a mesma mídia.
+            if output.is_file() {
+                let _ = fs::remove_file(&temp_output);
+            } else if fs::rename(&temp_output, &output).is_err() {
+                let _ = fs::remove_file(&temp_output);
+            }
+            if output.is_file() {
+                return Some(output.to_string_lossy().to_string());
+            }
+        }
+        let _ = fs::remove_file(&temp_output);
+    }
+    // Não deixa um jpg vazio/parcial envenenar o cache.
+    let _ = fs::remove_file(&temp_output);
+    None
 }
 
 fn ensure_provider_deleted_media_table(connection: &Connection) -> Result<(), String> {
@@ -2781,6 +3097,11 @@ pub fn delete_source_media(
             if abs.exists() {
                 trash::delete(&abs)
                     .map_err(|error| format!("Failed to delete '{}': {error}", abs.display()))?;
+            }
+            // A thumbnail é derivada e não precisa ir para a Lixeira junto com
+            // a mídia. Removê-la evita lixo órfão em `.thumbs`.
+            if let Some(thumbnail) = video_thumbnail_path(&abs) {
+                let _ = fs::remove_file(thumbnail);
             }
 
             connection
@@ -13907,6 +14228,15 @@ fn collect_media_file_paths(root: &Path) -> Result<Vec<PathBuf>, String> {
             let file_type = entry.file_type().map_err(|error| error.to_string())?;
 
             if file_type.is_dir() {
+                // Thumbnails derivadas não são mídia da galeria. Sem esta guarda,
+                // os jpgs em `<media-dir>/.thumbs` virariam posts duplicados.
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(".thumbs")
+                {
+                    continue;
+                }
                 pending.push(path);
                 continue;
             }
@@ -17130,6 +17460,8 @@ mod tests {
             post_id: id.map(str::to_string),
             post_url: url.map(str::to_string),
             captured_at: None,
+            downloaded_at: None,
+            author: None,
             media_type: "image".to_string(),
             section: "timeline".to_string(),
             albums: Vec::new(),
@@ -17181,6 +17513,91 @@ mod tests {
             extract_instagram_post_code_from_permalink(permalink).as_deref(),
             Some("cyabc-1_x")
         );
+    }
+
+    #[test]
+    fn derive_like_author_extracts_uploader_prefix() {
+        // yt-dlp: `<uploader>_<videoId>.<ext>` — o autor é o prefixo antes do id.
+        assert_eq!(
+            derive_like_author(
+                "gui3kkk_7624199329925958920.mp4",
+                Some("7624199329925958920")
+            )
+            .as_deref(),
+            Some("gui3kkk")
+        );
+        // Uploader com underscore é preservado por inteiro.
+        assert_eq!(
+            derive_like_author(
+                "some_user_7624199329925958920.mp4",
+                Some("7624199329925958920")
+            )
+            .as_deref(),
+            Some("some_user")
+        );
+        // 4K Tokkit: `<uploader>_<unix>_<videoId>` — o token unix é descartado.
+        assert_eq!(
+            derive_like_author(
+                "01.kessia_1773541356_7617302081459784980.mp4",
+                Some("7617302081459784980"),
+            )
+            .as_deref(),
+            Some("01.kessia")
+        );
+        // Slideshow do Tokkit: sufixo `_index_<i>_<n>` depois do id.
+        assert_eq!(
+            derive_like_author(
+                "abcvickxyz_1768619691_7596163701175094536_index_0_5.jpeg",
+                Some("7596163701175094536"),
+            )
+            .as_deref(),
+            Some("abcvickxyz")
+        );
+        // Sem id derivado não há como separar o autor.
+        assert_eq!(derive_like_author("whatever.mp4", None), None);
+        // Só o id (sem autor no nome) não vira autor.
+        assert_eq!(
+            derive_like_author("7624199329925958920.mp4", Some("7624199329925958920")),
+            None
+        );
+    }
+
+    #[test]
+    fn video_thumbnail_lives_beside_media_and_preserves_dot_name() {
+        let source = Path::new(r"S:\4K Tokkit\gui3kkk\Liked\.alice_123.mp4");
+        assert_eq!(
+            video_thumbnail_path(source),
+            Some(PathBuf::from(
+                r"S:\4K Tokkit\gui3kkk\Liked\.thumbs\.alice_123.mp4.jpg"
+            ))
+        );
+    }
+
+    #[test]
+    fn media_collection_ignores_generated_thumbs_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let media = temp.path().join("Liked").join(".alice_123.mp4");
+        let thumb = temp
+            .path()
+            .join("Liked")
+            .join(".thumbs")
+            .join(".alice_123.mp4.jpg");
+        fs::create_dir_all(thumb.parent().expect("thumb parent")).expect("create dirs");
+        fs::write(&media, b"video").expect("write media");
+        fs::write(&thumb, b"jpeg").expect("write thumb");
+
+        assert_eq!(
+            collect_media_file_paths(temp.path()).expect("collect media"),
+            vec![media]
+        );
+    }
+
+    #[test]
+    fn parse_rfc3339_unix_parses_ledger_timestamps() {
+        assert_eq!(parse_rfc3339_unix("1970-01-01T00:00:00Z"), Some(0));
+        // Espaços em volta são tolerados; valor inválido retorna None.
+        assert_eq!(parse_rfc3339_unix("  1970-01-01T00:00:10Z  "), Some(10));
+        assert_eq!(parse_rfc3339_unix("not-a-date"), None);
     }
 
     #[test]

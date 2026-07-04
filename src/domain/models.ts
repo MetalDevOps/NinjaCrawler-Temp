@@ -535,6 +535,10 @@ export interface MediaGalleryPost {
   postId?: string
   postUrl?: string
   capturedAt?: number
+  /** When the media was first downloaded/seen by the app (unix seconds). */
+  downloadedAt?: number
+  /** Original author — only set for TikTok Likes (used for author search). */
+  author?: string
   mediaType: 'video' | 'image' | 'slideshow'
   section: string
   /**
@@ -552,11 +556,51 @@ export interface MediaGalleryPost {
 }
 
 export interface SourceMediaGallery {
+    sourceId: string
+    provider: ProviderKey
+    handle: string
+    profileUrl: string
+    posts: MediaGalleryPost[]
+}
+
+export interface MediaThumbnailQueueItem {
   sourceId: string
   provider: ProviderKey
   handle: string
-  profileUrl: string
-  posts: MediaGalleryPost[]
+  state: 'queued' | 'running'
+  queuedAt: string
+  startedAt?: string
+  filesScanned: number
+  filesTotal: number
+  filesProcessed: number
+  generated: number
+  skippedExisting: number
+  failed: number
+  currentFile?: string
+  progressPercent?: number
+}
+
+export interface MediaThumbnailQueueResult {
+  sourceId: string
+  provider: ProviderKey
+  handle: string
+  status: 'succeeded' | 'failed'
+  summary: string
+  generated: number
+  skippedExisting: number
+  failed: number
+  finishedAt: string
+}
+
+export interface MediaThumbnailQueueStatus {
+  queuedCount: number
+  runningCount: number
+  completedCount: number
+  failedCount: number
+  active?: MediaThumbnailQueueItem
+  queuedItems: MediaThumbnailQueueItem[]
+  recentResults: MediaThumbnailQueueResult[]
+  updatedAt: string
 }
 
 export interface SingleVideo {

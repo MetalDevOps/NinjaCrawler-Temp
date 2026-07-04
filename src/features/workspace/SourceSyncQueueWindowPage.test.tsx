@@ -15,6 +15,8 @@ const bridgeMocks = vi.hoisted(() => ({
   loadSourceDeleteQueueStatus: vi.fn(),
   loadSourceSyncQueueStatus: vi.fn(),
   loadWorkspaceSnapshot: vi.fn(),
+  loadMediaThumbnailQueueStatus: vi.fn(),
+  enqueueMediaThumbnailGeneration: vi.fn(),
   openConnectorDebugWindow: vi.fn(),
   subscribeToDesktopRuntimeEvents: vi.fn(),
   loadSingleVideoQueueStatus: vi.fn(),
@@ -109,7 +111,25 @@ describe('SourceSyncQueueWindowPage', () => {
     bridgeMocks.runSourceSync.mockResolvedValue({})
     bridgeMocks.loadSourceSyncQueueStatus.mockResolvedValue(statusFixture())
     bridgeMocks.loadSourceDeleteQueueStatus.mockResolvedValue(deleteStatusFixture())
-    bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({ sources: [] })
+    bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({ sources: [], schedulerGroups: [] })
+    bridgeMocks.loadMediaThumbnailQueueStatus.mockResolvedValue({
+      queuedCount: 0,
+      runningCount: 0,
+      completedCount: 0,
+      failedCount: 0,
+      queuedItems: [],
+      recentResults: [],
+      updatedAt: '',
+    })
+    bridgeMocks.enqueueMediaThumbnailGeneration.mockResolvedValue({
+      queuedCount: 0,
+      runningCount: 0,
+      completedCount: 0,
+      failedCount: 0,
+      queuedItems: [],
+      recentResults: [],
+      updatedAt: '',
+    })
     bridgeMocks.openConnectorDebugWindow.mockResolvedValue(undefined)
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(() => undefined)
     bridgeMocks.loadSingleVideoQueueStatus.mockResolvedValue({
@@ -301,5 +321,25 @@ describe('SourceSyncQueueWindowPage', () => {
     expect(await screen.findByText(/^@delete-me$/i)).toBeTruthy()
     expect(screen.getAllByText(/^Delete/i).length).toBeGreaterThan(0)
     expect(screen.getByText(/removing files · phase 2\/4 · files 9\/20 · 45%/i)).toBeTruthy()
+  })
+
+  it('queues missing thumbnails for a provider scope', async () => {
+    bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({
+      sources: [
+        { id: 'tk-1', provider: 'tiktok', handle: '@one' },
+        { id: 'tk-2', provider: 'tiktok', handle: '@two' },
+        { id: 'ig-1', provider: 'instagram', handle: '@three' },
+      ],
+      schedulerGroups: [],
+    })
+    render(<SourceSyncQueueWindowPage />)
+
+    fireEvent.change(await screen.findByLabelText('Scope'), { target: { value: 'provider' } })
+    fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'tiktok' } })
+    fireEvent.click(screen.getByRole('button', { name: /generate missing thumbnails/i }))
+
+    await waitFor(() => {
+      expect(bridgeMocks.enqueueMediaThumbnailGeneration).toHaveBeenCalledWith(['tk-1', 'tk-2'])
+    })
   })
 })

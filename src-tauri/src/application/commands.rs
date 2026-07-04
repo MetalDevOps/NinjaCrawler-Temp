@@ -12,8 +12,8 @@ use crate::domain::models::{
     SyncPlanTargetPreviewInput, SyncPlanUpsert, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
-    connector_debug, connector_runtime, desktop_runtime, import_runtime, single_video_runtime,
-    source_delete_runtime, source_sync_runtime, workspace_repository,
+    connector_debug, connector_runtime, desktop_runtime, import_runtime, media_thumbnail_runtime,
+    single_video_runtime, source_delete_runtime, source_sync_runtime, workspace_repository,
 };
 
 fn publish_snapshot(
@@ -569,6 +569,26 @@ pub fn load_source_media_gallery(
     source_id: String,
 ) -> Result<crate::domain::models::SourceMediaGallery, String> {
     workspace_repository::load_source_media_gallery(source_id)
+}
+
+#[tauri::command]
+pub fn load_media_thumbnails(
+    paths: Vec<String>,
+) -> Result<crate::domain::models::MediaThumbnailBatch, String> {
+    workspace_repository::load_media_thumbnails(paths)
+}
+
+#[tauri::command]
+pub fn enqueue_media_thumbnail_generation(
+    source_ids: Vec<String>,
+) -> Result<crate::domain::models::MediaThumbnailQueueStatus, String> {
+    media_thumbnail_runtime::enqueue(source_ids)
+}
+
+#[tauri::command]
+pub fn media_thumbnail_queue_status(
+) -> Result<crate::domain::models::MediaThumbnailQueueStatus, String> {
+    media_thumbnail_runtime::queue_status()
 }
 
 #[tauri::command]

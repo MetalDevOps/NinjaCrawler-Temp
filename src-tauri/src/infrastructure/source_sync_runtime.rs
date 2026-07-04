@@ -10,7 +10,9 @@ use crate::domain::models::{
     RunSourceSyncInput, SourceSyncOptions, SourceSyncQueueItem, SourceSyncQueueProviderStatus,
     SourceSyncQueueRecentResult, SourceSyncQueueStatus, WorkspaceSnapshot,
 };
-use crate::infrastructure::{desktop_runtime, runtime_log, workspace_repository};
+use crate::infrastructure::{
+    desktop_runtime, media_thumbnail_runtime, runtime_log, workspace_repository,
+};
 use crate::providers;
 
 const SCHEDULER_TICK_EVENT: &str = "runtime://scheduler-tick";
@@ -419,6 +421,9 @@ fn spawn_worker(app: AppHandle, provider: String) {
             job.run_mode.clone(),
             job.sync_options_override.clone(),
         );
+        if sync_result.is_ok() {
+            let _ = media_thumbnail_runtime::enqueue(vec![job.source_id.clone()]);
+        }
         let (final_status, final_summary) = summarize_sync_result(&job.source_id, &sync_result);
         finish_active(&job, &final_status, &final_summary);
         publish_queue_status_event(&app);
