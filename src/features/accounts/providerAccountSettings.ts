@@ -14,7 +14,6 @@ export type ProviderAccountSettingsCategoryKey =
   | 'timers'
   | 'defaults'
   | 'errors'
-  | 'diagnostics'
 
 export type ProviderAccountSettingsFieldKind = 'text' | 'textarea' | 'number' | 'toggle'
 
@@ -49,14 +48,11 @@ const INSTAGRAM_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
     { key: 'download', label: 'Download', description: '' },
     { key: 'timers', label: 'Timers', description: '' },
     { key: 'errors', label: 'Errors & Limits', description: '' },
-    { key: 'diagnostics', label: 'Diagnostics', description: '' },
   ],
   fields: [
     { key: 'instagram.account.mediaPath', category: 'account', label: 'Media path', kind: 'text', placeholder: 'D:/Media/Instagram/Main', defaultValue: '' },
     { key: 'instagram.account.savedPostsPath', category: 'account', label: 'Saved posts path', kind: 'text', placeholder: 'D:/Media/Instagram/Saved', defaultValue: '' },
-    { key: 'instagram.account.downloadSiteData', category: 'account', label: 'Download site data', kind: 'toggle', defaultValue: 'true' },
     { key: 'instagram.account.downloadSavedPosts', category: 'account', label: 'Download saved posts', tooltip: 'Includes saved posts in this account workflow.', kind: 'toggle', defaultValue: 'false' },
-    { key: 'instagram.account.getUserMediaOnly', category: 'account', label: 'Get user media only', kind: 'toggle', defaultValue: 'false' },
 
     { key: 'instagram.auth.csrfToken', category: 'authorization', label: 'x-csrftoken', tooltip: 'Usually comes from the current cookies.', kind: 'text', defaultValue: '' },
     { key: 'instagram.auth.appId', category: 'authorization', label: 'x-ig-app-id', kind: 'text', defaultValue: '' },
@@ -76,11 +72,10 @@ const INSTAGRAM_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
     { key: 'instagram.download.postCountVerified', category: 'download', label: 'Post count verified', kind: 'number', defaultValue: '0' },
     { key: 'instagram.download.postCountUnverified', category: 'download', label: 'Post count unverified', kind: 'number', defaultValue: '0' },
 
-    { key: 'instagram.timers.requestAnyMs', category: 'timers', label: 'Request timer (any) ms', tooltip: 'Base delay before the next request.', kind: 'number', defaultValue: '1500' },
-    { key: 'instagram.timers.requestMs', category: 'timers', label: 'Request timer ms', tooltip: 'Extra delay after the request counter threshold is reached.', kind: 'number', defaultValue: '1000' },
-    { key: 'instagram.timers.requestCounter', category: 'timers', label: 'Request timer counter', tooltip: 'How many requests run before the request timer is applied.', kind: 'number', defaultValue: '10' },
-    { key: 'instagram.timers.postsLimitMs', category: 'timers', label: 'Posts limit timer ms', tooltip: 'Cooldown after a posts limit is reached.', kind: 'number', defaultValue: '3000' },
-    { key: 'instagram.timers.nextProfileMs', category: 'timers', label: 'Next profile timer ms', tooltip: 'Delay before the next profile starts. Use -1 to disable it and -2 to use the maximum timer.', kind: 'number', defaultValue: '5000' },
+    { key: 'instagram.timers.requestAnyMs', category: 'timers', label: 'Request timer (any) ms', tooltip: 'Base delay before every Instagram API request.', kind: 'number', defaultValue: '1500' },
+    { key: 'instagram.timers.requestMs', category: 'timers', label: 'Request timer ms', tooltip: 'Extra delay applied once every N requests, where N is the request timer counter.', kind: 'number', defaultValue: '1000' },
+    { key: 'instagram.timers.requestCounter', category: 'timers', label: 'Request timer counter', tooltip: 'How many requests run before the extra request timer is applied.', kind: 'number', defaultValue: '10' },
+    { key: 'instagram.timers.postsLimitMs', category: 'timers', label: 'Posts limit timer ms', tooltip: 'Pause between post pages while listing a profile.', kind: 'number', defaultValue: '3000' },
 
     { key: 'instagram.defaults.labels', category: 'defaults', label: 'Default labels', kind: 'text', placeholder: 'reference, priority', defaultValue: '' },
     { key: 'instagram.defaults.readyForDownload', category: 'defaults', label: 'Ready for download by default', kind: 'toggle', defaultValue: 'true' },
@@ -104,12 +99,9 @@ const INSTAGRAM_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
     { key: 'instagram.errors.ignoreStories560', category: 'errors', label: 'Ignore stories 560', tooltip: 'Skips error 560 and continues the download.', kind: 'toggle', defaultValue: 'true' },
     { key: 'instagram.errors.skipErrors', category: 'errors', label: 'Skip recoverable errors', tooltip: 'Skips listed errors and continues the download.', kind: 'toggle', defaultValue: 'true' },
     { key: 'instagram.errors.addSkippedErrorsToLog', category: 'errors', label: 'Add skipped errors to log', kind: 'toggle', defaultValue: 'true' },
-    { key: 'instagram.errors.skipErrorsExclude', category: 'errors', label: 'Skip errors (exclude)', tooltip: 'Comma-separated errors to keep out of the log.', kind: 'textarea', placeholder: 'checkpoint_required, login_required', defaultValue: '' },
-    { key: 'instagram.errors.taggedNotifyLimit', category: 'errors', label: 'Tagged notify limit', tooltip: 'Notifies the operator when tagged posts exceed this value.', kind: 'number', defaultValue: '25' },
+    { key: 'instagram.errors.skipErrorsExclude', category: 'errors', label: 'Skip errors (exclude)', tooltip: 'Comma-separated terms that must not be skipped: a matching error fails the section even with skip enabled.', kind: 'textarea', placeholder: 'checkpoint_required, login_required', defaultValue: '' },
+    { key: 'instagram.errors.taggedNotifyLimit', category: 'errors', label: 'Tagged notify limit', tooltip: 'Adds a warning to the sync summary when tagged posts exceed this count. 0 disables the warning.', kind: 'number', defaultValue: '25' },
 
-    { key: 'instagram.diagnostics.traceRequests', category: 'diagnostics', label: 'Trace request pacing', kind: 'toggle', defaultValue: 'false' },
-    { key: 'instagram.diagnostics.logGraphQlResponses', category: 'diagnostics', label: 'Log GraphQL responses', kind: 'toggle', defaultValue: 'false' },
-    { key: 'instagram.diagnostics.notes', category: 'diagnostics', label: 'Diagnostic notes', kind: 'textarea', placeholder: 'Operator notes for this account', defaultValue: '' },
   ],
 }
 
@@ -123,8 +115,6 @@ const TWITTER_SETTINGS_LAYOUT: ProviderAccountSettingsLayout = {
   ],
   fields: [
     { key: 'twitter.account.mediaPath', category: 'account', label: 'Path', kind: 'text', placeholder: 'F:/SCrawler/Data/Twitter', defaultValue: '' },
-    { key: 'twitter.account.savedPostsPath', category: 'account', label: 'Saved posts path', tooltip: 'Bookmarks land here (x.com/i/bookmarks).', kind: 'text', placeholder: 'F:/SCrawler/Data/Twitter/Saved', defaultValue: '' },
-    { key: 'twitter.account.downloadSavedPosts', category: 'account', label: 'Download saved posts', kind: 'toggle', defaultValue: 'false' },
 
     { key: 'twitter.auth.useUserAgent', category: 'authorization', label: 'Use UserAgent', kind: 'toggle', defaultValue: 'true' },
     { key: 'twitter.auth.userAgent', category: 'authorization', label: 'UserAgent', kind: 'textarea', defaultValue: '' },

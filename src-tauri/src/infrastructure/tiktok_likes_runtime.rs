@@ -78,6 +78,14 @@ struct LikedVideo {
     id: String,
     author: String,
     url: String,
+    #[serde(default)]
+    view_count: Option<i64>,
+    #[serde(default)]
+    like_count: Option<i64>,
+    #[serde(default)]
+    comment_count: Option<i64>,
+    #[serde(default)]
+    share_count: Option<i64>,
 }
 
 pub struct TikTokLikesSourceRequest {
@@ -88,6 +96,8 @@ pub struct TikTokLikesSourceRequest {
     pub item_limit: usize,
     pub incremental: bool,
     pub known_page_threshold: usize,
+    pub collect_media_stats: bool,
+    pub refresh_existing_media_stats: bool,
 }
 
 #[derive(Default)]
@@ -99,6 +109,7 @@ pub struct TikTokLikesSyncResult {
     pub failures: Vec<String>,
     pub pages_read: usize,
     pub stopped_incrementally: bool,
+    pub stats_updated: usize,
 }
 
 pub fn run_source_sync<F, C>(
@@ -119,7 +130,8 @@ where
         resolve_stored_media(&session, relative_path).map(|_| item_id.clone())
     }));
     let baseline_complete = has_completed_full_scan(&session.account_id, &session.source_id)?;
-    let incremental_active = request.incremental && baseline_complete;
+    let incremental_active =
+        request.incremental && baseline_complete && !request.refresh_existing_media_stats;
     connector_debug::append_current(
         "internal.tiktok.likes",
         "system",
@@ -163,11 +175,13 @@ where
         let window = create_likes_window(app, &session)?;
         let output = run_probe(
             &window,
-            &ms_token,
-            request.item_limit,
-            &known_present_ids,
-            incremental_active,
-            request.known_page_threshold,
+            &LikesProbePlan {
+                ms_token: &ms_token,
+                item_limit: request.item_limit,
+                known_present_ids: &known_present_ids,
+                incremental_active,
+                known_page_threshold: request.known_page_threshold,
+            },
             &mut report_progress,
             &is_cancelled,
         );
@@ -219,8 +233,12 @@ where
         let mut result = download_liked_videos(
             &session,
             &items,
-            &existing,
-            &disk_media_by_id,
+            &LikedVideosDownloadContext {
+                ledger: &existing,
+                disk_media_by_id: &disk_media_by_id,
+                collect_media_stats: request.collect_media_stats,
+                refresh_existing_media_stats: request.refresh_existing_media_stats,
+            },
             &mut report_progress,
             &is_cancelled,
         )?;
@@ -442,13 +460,19 @@ fn inject_cookies(window: &WebviewWindow<Wry>, cookies: &[StoredCookie]) -> Resu
     Ok(())
 }
 
-fn run_probe<F, C>(
-    window: &WebviewWindow<Wry>,
-    ms_token: &str,
+/// Parâmetros da varredura de likes dentro do WebView (paginação e critério
+/// de parada incremental).
+struct LikesProbePlan<'a> {
+    ms_token: &'a str,
     item_limit: usize,
-    known_present_ids: &HashSet<String>,
+    known_present_ids: &'a HashSet<String>,
     incremental_active: bool,
     known_page_threshold: usize,
+}
+
+fn run_probe<F, C>(
+    window: &WebviewWindow<Wry>,
+    plan: &LikesProbePlan<'_>,
     report_progress: &mut F,
     is_cancelled: &C,
 ) -> Result<Value, String>
@@ -456,6 +480,13 @@ where
     F: FnMut(Option<u32>, String, String, bool, Option<u32>),
     C: Fn() -> bool,
 {
+    let &LikesProbePlan {
+        ms_token,
+        item_limit,
+        known_present_ids,
+        incremental_active,
+        known_page_threshold,
+    } = plan;
     if let Err(error) = wait_until(
         window,
         "Boolean(window.byted_acrawler?.frontierSign)",
@@ -745,7 +776,11 @@ window.__ninjaCrawlerTikTokLikesProgress = {{ pages: 0, items: 0 }};
         items.push({{
           id: String(item.id),
           author: item.author.uniqueId,
-          url: `https://www.tiktok.com/@${{item.author.uniqueId}}/video/${{item.id}}`
+          url: `https://www.tiktok.com/@${{item.author.uniqueId}}/video/${{item.id}}`,
+          view_count: Number(item?.statsV2?.playCount ?? item?.stats?.playCount ?? 0),
+          like_count: Number(item?.statsV2?.diggCount ?? item?.stats?.diggCount ?? 0),
+          comment_count: Number(item?.statsV2?.commentCount ?? item?.stats?.commentCount ?? 0),
+          share_count: Number(item?.statsV2?.shareCount ?? item?.stats?.shareCount ?? 0)
         }});
       }}
       if (
@@ -809,11 +844,19 @@ window.__ninjaCrawlerTikTokLikesProgress = {{ pages: 0, items: 0 }};
     )
 }
 
+/// O que já se sabe sobre a mídia local e as opções de stats, usados para
+/// decidir por item entre baixar, pular ou só atualizar estatísticas.
+struct LikedVideosDownloadContext<'a> {
+    ledger: &'a HashMap<String, String>,
+    disk_media_by_id: &'a HashMap<String, PathBuf>,
+    collect_media_stats: bool,
+    refresh_existing_media_stats: bool,
+}
+
 fn download_liked_videos<F, C>(
     session: &StoredSession,
     items: &[LikedVideo],
-    ledger: &HashMap<String, String>,
-    disk_media_by_id: &HashMap<String, PathBuf>,
+    context: &LikedVideosDownloadContext<'_>,
     report_progress: &mut F,
     is_cancelled: &C,
 ) -> Result<TikTokLikesSyncResult, String>
@@ -821,6 +864,12 @@ where
     F: FnMut(Option<u32>, String, String, bool, Option<u32>),
     C: Fn() -> bool,
 {
+    let &LikedVideosDownloadContext {
+        ledger,
+        disk_media_by_id,
+        collect_media_stats,
+        refresh_existing_media_stats,
+    } = context;
     let mut stats = TikTokLikesSyncResult {
         discovered: items.len(),
         ..TikTokLikesSyncResult::default()
@@ -859,8 +908,12 @@ where
                 if repaired_ledger {
                     persist_download(session, item, &existing_path)?;
                 }
+                if collect_media_stats && refresh_existing_media_stats {
+                    persist_liked_video_stats(session, item)?;
+                    stats.stats_updated += 1;
+                }
                 stats.skipped_existing += 1;
-                if stats.skipped_existing == 1 || stats.skipped_existing % 50 == 0 {
+                if stats.skipped_existing == 1 || stats.skipped_existing.is_multiple_of(50) {
                     connector_debug::append_current(
                         "internal.tiktok.likes",
                         "system",
@@ -884,6 +937,10 @@ where
             match download_liked_video(session, item, &cookie_path) {
                 Ok(path) => {
                     persist_download(session, item, &path)?;
+                    if collect_media_stats {
+                        persist_liked_video_stats(session, item)?;
+                        stats.stats_updated += 1;
+                    }
                     stats.downloaded += 1;
                     connector_debug::append_current(
                         "internal.tiktok.likes",
@@ -927,6 +984,36 @@ where
     })();
     let _ = fs::remove_file(cookie_path);
     result
+}
+
+fn persist_liked_video_stats(session: &StoredSession, item: &LikedVideo) -> Result<(), String> {
+    let layout = storage::ensure_workspace_layout().map_err(|error| error.to_string())?;
+    let connection =
+        database::open_connection(&layout.db_path).map_err(|error| error.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    connection
+        .execute(
+            "UPDATE provider_sync_post_ledger
+             SET view_count = ?1,
+                 like_count = ?2,
+                 comment_count = ?3,
+                 share_count = ?4,
+                 stats_updated_at = ?5
+             WHERE provider = 'tiktok'
+               AND source_id = ?6
+               AND provider_post_key = ?7",
+            rusqlite::params![
+                item.view_count,
+                item.like_count,
+                item.comment_count,
+                item.share_count,
+                &now,
+                &session.source_id,
+                &item.id,
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn load_existing_ledger(account_id: &str) -> Result<HashMap<String, String>, String> {

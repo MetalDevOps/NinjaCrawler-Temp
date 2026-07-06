@@ -11,7 +11,7 @@ pub fn run() {
         .plugin(infrastructure::desktop_runtime::window_state_plugin())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            infrastructure::desktop_runtime::setup(&app.handle())
+            infrastructure::desktop_runtime::setup(app.handle())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             infrastructure::scheduler_runtime::start(app.handle().clone())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
@@ -107,6 +107,9 @@ pub fn run() {
             application::commands::clone_sync_plan,
             application::commands::open_source_folder,
             application::commands::load_source_media_gallery,
+            application::commands::load_media_thumbnails,
+            application::commands::enqueue_media_thumbnail_generation,
+            application::commands::media_thumbnail_queue_status,
             application::commands::enqueue_single_video_download,
             application::commands::single_video_queue_status,
             application::commands::list_single_videos,

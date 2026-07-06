@@ -439,6 +439,13 @@ pub struct MediaGalleryPost {
     pub post_id: Option<String>,
     pub post_url: Option<String>,
     pub captured_at: Option<i64>,
+    /// Momento (unix) em que a mídia foi baixada/vista pela 1ª vez pelo app —
+    /// derivado do `first_seen_at` do ledger, com fallback para o mtime do
+    /// arquivo. Usado como eixo alternativo de ordenação (Download Date).
+    pub downloaded_at: Option<i64>,
+    /// Autor original do conteúdo. Só é preenchido nos Likes do TikTok (o dono
+    /// do perfil curtiu o vídeo de outra pessoa); usado para busca por autor.
+    pub author: Option<String>,
     /// "video" | "image" | "slideshow"
     pub media_type: String,
     /// Subpasta do perfil ("timeline"/raiz, "stories", "reposts", "video").
@@ -449,6 +456,11 @@ pub struct MediaGalleryPost {
     pub albums: Vec<String>,
     /// Caminho absoluto de uma miniatura/poster (cover do vídeo, quando houver).
     pub poster_path: Option<String>,
+    pub view_count: Option<i64>,
+    pub like_count: Option<i64>,
+    pub comment_count: Option<i64>,
+    pub share_count: Option<i64>,
+    pub stats_updated_at: Option<String>,
     pub files: Vec<MediaGalleryFile>,
 }
 
@@ -460,6 +472,63 @@ pub struct SourceMediaGallery {
     pub handle: String,
     pub profile_url: String,
     pub posts: Vec<MediaGalleryPost>,
+}
+
+/// Lote de thumbnails de vídeo gerados sob demanda (ffmpeg) para o grid do
+/// Profile View. `available=false` sinaliza que o ffmpeg não está instalado —
+/// o front cai no thumb por `<video>` de antes.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaThumbnailBatch {
+    pub available: bool,
+    /// caminho absoluto do vídeo → caminho absoluto do jpg em cache.
+    pub thumbs: HashMap<String, String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaThumbnailQueueItem {
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    pub state: String,
+    pub queued_at: String,
+    pub started_at: Option<String>,
+    pub files_scanned: u32,
+    pub files_total: u32,
+    pub files_processed: u32,
+    pub generated: u32,
+    pub skipped_existing: u32,
+    pub failed: u32,
+    pub current_file: Option<String>,
+    pub progress_percent: Option<u32>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaThumbnailQueueResult {
+    pub source_id: String,
+    pub provider: String,
+    pub handle: String,
+    pub status: String,
+    pub summary: String,
+    pub generated: u32,
+    pub skipped_existing: u32,
+    pub failed: u32,
+    pub finished_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaThumbnailQueueStatus {
+    pub queued_count: u32,
+    pub running_count: u32,
+    pub completed_count: u32,
+    pub failed_count: u32,
+    pub active: Option<MediaThumbnailQueueItem>,
+    pub queued_items: Vec<MediaThumbnailQueueItem>,
+    pub recent_results: Vec<MediaThumbnailQueueResult>,
+    pub updated_at: String,
 }
 
 /// Vídeo avulso capturado por URL (via Companion), fora da estrutura de perfis.
@@ -923,6 +992,10 @@ pub struct TikTokSourceSyncOptions {
     pub liked_videos_incremental: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liked_videos_known_page_threshold: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collect_media_stats: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_existing_media_stats: Option<bool>,
     /// Story capturado pelo Companion: baixa só este vídeo na pasta Stories/ do
     /// perfil, sem enumerar a timeline.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -988,6 +1061,8 @@ pub fn default_tiktok_source_sync_options() -> TikTokSourceSyncOptions {
         liked_videos_limit: Some(100),
         liked_videos_incremental: Some(true),
         liked_videos_known_page_threshold: Some(3),
+        collect_media_stats: Some(true),
+        refresh_existing_media_stats: Some(false),
         target_video_url: None,
         download_videos: Some(true),
         download_photos: Some(true),
@@ -1491,7 +1566,6 @@ pub struct SchedulerPlanCriteria {
     pub group_ids_included: Vec<String>,
     #[serde(default)]
     pub group_ids_excluded: Vec<String>,
-    pub groups_only: bool,
     pub users_count: Option<u32>,
     pub days_number: Option<u32>,
     pub days_is_downloaded: bool,
@@ -1499,7 +1573,6 @@ pub struct SchedulerPlanCriteria {
     pub date_to: Option<String>,
     #[serde(default = "default_date_in_range")]
     pub date_in_range: bool,
-    pub date_mode: Option<String>,
     pub advanced_expression: Option<String>,
 }
 

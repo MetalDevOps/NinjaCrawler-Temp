@@ -14,6 +14,8 @@ export interface MediaLightboxProps {
   onPrev: () => void
   onNext: () => void
   onClose: () => void
+  /** Nome exibido acima da mídia (@autor do like ou handle do perfil). */
+  title?: string
   /** Ações abaixo do preview (Open online / Reveal / etc.). */
   actions?: ReactNode
 }
@@ -26,6 +28,7 @@ export function MediaLightbox({
   onPrev,
   onNext,
   onClose,
+  title,
   actions,
 }: MediaLightboxProps) {
   return (
@@ -47,8 +50,10 @@ export function MediaLightbox({
         </button>
       ) : null}
       <div className="profile-view-lightbox-stage" onClick={(event) => event.stopPropagation()}>
+        {title ? <div className="profile-view-lightbox-title">{title}</div> : null}
         {isVideo ? (
-          <video src={convertFileSrc(fileAbsPath)} controls autoPlay />
+          // TikTok-style: o vídeo repete sozinho ao terminar.
+          <video src={convertFileSrc(fileAbsPath)} controls autoPlay loop />
         ) : (
           <img src={convertFileSrc(fileAbsPath)} alt="" />
         )}

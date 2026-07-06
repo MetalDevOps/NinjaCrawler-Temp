@@ -298,7 +298,6 @@ export function SourceEditorDialog({
         sitesExcluded: [],
         groupIdsIncluded: [],
         groupIdsExcluded: [],
-        groupsOnly: false,
         daysIsDownloaded: false,
         dateInRange: true,
       }

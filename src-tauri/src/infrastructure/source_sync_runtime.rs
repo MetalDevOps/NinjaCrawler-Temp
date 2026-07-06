@@ -10,7 +10,10 @@ use crate::domain::models::{
     RunSourceSyncInput, SourceSyncOptions, SourceSyncQueueItem, SourceSyncQueueProviderStatus,
     SourceSyncQueueRecentResult, SourceSyncQueueStatus, WorkspaceSnapshot,
 };
-use crate::infrastructure::{desktop_runtime, runtime_log, workspace_repository};
+use crate::infrastructure::runtime_log::RuntimeLogAnchor;
+use crate::infrastructure::{
+    desktop_runtime, media_thumbnail_runtime, runtime_log, workspace_repository,
+};
 use crate::providers;
 
 const SCHEDULER_TICK_EVENT: &str = "runtime://scheduler-tick";
@@ -133,23 +136,11 @@ fn publish_queue_status_event_from_registered_app() {
 fn log_source_sync_event(
     scope: &str,
     level: &str,
-    source_id: &str,
-    provider: &str,
-    handle: &str,
-    account_id: Option<&str>,
+    context: RuntimeLogAnchor<'_>,
     message: impl Into<String>,
     detail: Option<String>,
 ) {
-    let _ = runtime_log::append_workspace(
-        scope,
-        level,
-        account_id,
-        Some(provider),
-        Some(source_id),
-        Some(handle),
-        message,
-        detail,
-    );
+    let _ = runtime_log::append_workspace(scope, level, context, message, detail);
 }
 
 fn enqueue_job(state: &mut SourceSyncQueueState, job: SourceSyncQueueJob) -> QueueEnqueueResult {
@@ -162,11 +153,11 @@ fn enqueue_job(state: &mut SourceSyncQueueState, job: SourceSyncQueueJob) -> Que
         .is_some_and(|active| active.source_id == source_id);
     let mut promoted_existing_job = false;
 
-    if let Some(existing_job) = state
-        .queues
-        .get_mut(&provider)
-        .and_then(|queue| queue.iter_mut().find(|queued| queued.source_id == source_id))
-    {
+    if let Some(existing_job) = state.queues.get_mut(&provider).and_then(|queue| {
+        queue
+            .iter_mut()
+            .find(|queued| queued.source_id == source_id)
+    }) {
         if force_imported_backfill {
             existing_job.trigger = job.trigger.clone();
             existing_job.run_mode = job.run_mode.clone();
@@ -177,7 +168,11 @@ fn enqueue_job(state: &mut SourceSyncQueueState, job: SourceSyncQueueJob) -> Que
 
     let already_queued = state.queued_ids.contains(&source_id);
     let queued_now = if !already_queued && (!already_active || force_imported_backfill) {
-        state.queues.entry(provider.clone()).or_default().push_back(job);
+        state
+            .queues
+            .entry(provider.clone())
+            .or_default()
+            .push_back(job);
         state.queued_ids.insert(source_id);
         true
     } else {
@@ -270,10 +265,12 @@ pub fn enqueue_source_sync(
         log_source_sync_event(
             "sync.queue",
             "info",
-            &seed.source_id,
-            &seed.provider,
-            &seed.handle,
-            seed.account_id.as_deref(),
+            RuntimeLogAnchor {
+                source_id: Some(&seed.source_id),
+                provider: Some(&seed.provider),
+                source_handle: Some(&seed.handle),
+                account_id: seed.account_id.as_deref(),
+            },
             format!("Queued source sync for '{}'.", seed.handle),
             None,
         );
@@ -283,10 +280,12 @@ pub fn enqueue_source_sync(
         log_source_sync_event(
             "sync.queue",
             "info",
-            &seed.source_id,
-            &seed.provider,
-            &seed.handle,
-            seed.account_id.as_deref(),
+            RuntimeLogAnchor {
+                source_id: Some(&seed.source_id),
+                provider: Some(&seed.provider),
+                source_handle: Some(&seed.handle),
+                account_id: seed.account_id.as_deref(),
+            },
             format!(
                 "Promoted queued source sync for '{}' to force legacy backfill.",
                 seed.handle
@@ -361,10 +360,12 @@ pub fn restore_persisted_queue(app: &AppHandle) {
             log_source_sync_event(
                 "sync.queue",
                 "info",
-                &seed.source_id,
-                &seed.provider,
-                &seed.handle,
-                seed.account_id.as_deref(),
+                RuntimeLogAnchor {
+                    source_id: Some(&seed.source_id),
+                    provider: Some(&seed.provider),
+                    source_handle: Some(&seed.handle),
+                    account_id: seed.account_id.as_deref(),
+                },
                 format!(
                     "Restored queued source sync for '{}' from the previous session.",
                     seed.handle
@@ -419,6 +420,9 @@ fn spawn_worker(app: AppHandle, provider: String) {
             job.run_mode.clone(),
             job.sync_options_override.clone(),
         );
+        if sync_result.is_ok() {
+            let _ = media_thumbnail_runtime::enqueue(vec![job.source_id.clone()]);
+        }
         let (final_status, final_summary) = summarize_sync_result(&job.source_id, &sync_result);
         finish_active(&job, &final_status, &final_summary);
         publish_queue_status_event(&app);
@@ -428,18 +432,18 @@ fn spawn_worker(app: AppHandle, provider: String) {
         // (<provider>.account.delayBetweenDownloadsSecs) com fallback no padrão
         // global (policy.sync.delayBetweenProfilesSecs). Só dorme se ainda
         // houver job pendente DESTE provider, em passos de 1s.
-        let delay_secs = workspace_repository::sync_delay_for_account(
-            job.account_id.as_deref(),
-            &job.provider,
-        );
+        let delay_secs =
+            workspace_repository::sync_delay_for_account(job.account_id.as_deref(), &job.provider);
         if delay_secs > 0 && provider_has_pending_jobs(&provider) {
             log_source_sync_event(
                 "sync.queue",
                 "debug",
-                &job.source_id,
-                &job.provider,
-                &job.handle,
-                job.account_id.as_deref(),
+                RuntimeLogAnchor {
+                    source_id: Some(&job.source_id),
+                    provider: Some(&job.provider),
+                    source_handle: Some(&job.handle),
+                    account_id: job.account_id.as_deref(),
+                },
                 "Provider cooldown is delaying the next queued sync.",
                 Some(format!(
                     "Waiting {delay_secs} seconds before starting the next {} job.",
@@ -452,10 +456,12 @@ fn spawn_worker(app: AppHandle, provider: String) {
             log_source_sync_event(
                 "sync.queue",
                 "debug",
-                &job.source_id,
-                &job.provider,
-                &job.handle,
-                job.account_id.as_deref(),
+                RuntimeLogAnchor {
+                    source_id: Some(&job.source_id),
+                    provider: Some(&job.provider),
+                    source_handle: Some(&job.handle),
+                    account_id: job.account_id.as_deref(),
+                },
                 "Provider cooldown finished.",
                 Some(format!("The next {} job can now start.", job.provider)),
             );
@@ -505,10 +511,12 @@ fn dequeue_next(provider: &str) -> Result<Option<SourceSyncQueueJob>, String> {
             log_source_sync_event(
                 "sync.run",
                 "info",
-                &job.source_id,
-                &job.provider,
-                &job.handle,
-                job.account_id.as_deref(),
+                RuntimeLogAnchor {
+                    source_id: Some(&job.source_id),
+                    provider: Some(&job.provider),
+                    source_handle: Some(&job.handle),
+                    account_id: job.account_id.as_deref(),
+                },
                 format!("Started source sync for '{}'.", job.handle),
                 job.account_id
                     .as_ref()
@@ -588,10 +596,12 @@ fn finish_active(job: &SourceSyncQueueJob, status: &str, summary: &str) {
     log_source_sync_event(
         "sync.run",
         level,
-        &job.source_id,
-        &job.provider,
-        &job.handle,
-        job.account_id.as_deref(),
+        RuntimeLogAnchor {
+            source_id: Some(&job.source_id),
+            provider: Some(&job.provider),
+            source_handle: Some(&job.handle),
+            account_id: job.account_id.as_deref(),
+        },
         message,
         Some(summary.to_string()),
     );
@@ -696,10 +706,12 @@ pub fn report_source_sync_progress(
         log_source_sync_event(
             "sync.progress",
             "debug",
-            &source_id,
-            &provider,
-            &handle,
-            account_id.as_deref(),
+            RuntimeLogAnchor {
+                source_id: Some(&source_id),
+                provider: Some(&provider),
+                source_handle: Some(&handle),
+                account_id: account_id.as_deref(),
+            },
             progress_label.unwrap_or_else(|| "Source sync progress updated.".to_string()),
             (!detail_parts.is_empty()).then(|| detail_parts.join(" ")),
         );
@@ -748,10 +760,12 @@ pub fn cancel_source_sync_profile(
         log_source_sync_event(
             "sync.queue",
             "warning",
-            &job.source_id,
-            &job.provider,
-            &job.handle,
-            job.account_id.as_deref(),
+            RuntimeLogAnchor {
+                source_id: Some(&job.source_id),
+                provider: Some(&job.provider),
+                source_handle: Some(&job.handle),
+                account_id: job.account_id.as_deref(),
+            },
             format!("Cancelled queued source sync for '{}'.", job.handle),
             Some("Removed from the queue before execution.".to_string()),
         );
@@ -762,10 +776,12 @@ pub fn cancel_source_sync_profile(
             log_source_sync_event(
                 "sync.run",
                 "warning",
-                &job.source_id,
-                &job.provider,
-                &job.handle,
-                job.account_id.as_deref(),
+                RuntimeLogAnchor {
+                    source_id: Some(&job.source_id),
+                    provider: Some(&job.provider),
+                    source_handle: Some(&job.handle),
+                    account_id: job.account_id.as_deref(),
+                },
                 format!("Cancellation requested for '{}'.", job.handle),
                 Some("User requested cancellation for the active source sync.".to_string()),
             );
@@ -829,10 +845,12 @@ pub fn cancel_source_sync_provider(
         log_source_sync_event(
             "sync.queue",
             "warning",
-            &job.source_id,
-            &job.provider,
-            &job.handle,
-            job.account_id.as_deref(),
+            RuntimeLogAnchor {
+                source_id: Some(&job.source_id),
+                provider: Some(&job.provider),
+                source_handle: Some(&job.handle),
+                account_id: job.account_id.as_deref(),
+            },
             format!("Cancelled queued source sync for '{}'.", job.handle),
             Some("Provider cancellation removed the job before execution.".to_string()),
         );
@@ -842,10 +860,12 @@ pub fn cancel_source_sync_provider(
         log_source_sync_event(
             "sync.run",
             "warning",
-            &job.source_id,
-            &job.provider,
-            &job.handle,
-            job.account_id.as_deref(),
+            RuntimeLogAnchor {
+                source_id: Some(&job.source_id),
+                provider: Some(&job.provider),
+                source_handle: Some(&job.handle),
+                account_id: job.account_id.as_deref(),
+            },
             format!("Cancellation requested for '{}'.", job.handle),
             Some("Provider cancellation requested stop for the active source sync.".to_string()),
         );
@@ -940,7 +960,11 @@ pub fn reorder_source_sync_provider_queue(
             let mut jobs: Vec<SourceSyncQueueJob> = queue.drain(..).collect();
             // sort_by_key é estável: jobs fora da lista (usize::MAX) preservam a
             // ordem relativa original ao final.
-            jobs.sort_by_key(|job| rank.get(job.source_id.as_str()).copied().unwrap_or(usize::MAX));
+            jobs.sort_by_key(|job| {
+                rank.get(job.source_id.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
             *queue = jobs.into_iter().collect();
         }
         // Ordem a persistir: o job ativo do provider primeiro (restaura antes),
@@ -1040,11 +1064,17 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
         })
         .collect::<Vec<_>>();
 
-    let mut queued_items = state
-        .queues
-        .values()
-        .flat_map(|queue| queue.iter())
-        .map(|job| SourceSyncQueueItem {
+    // A ordem interna de cada sub-fila é autoritativa: reflete o drag manual
+    // e o restore por order_index. Reordenar aqui (ex.: por queued_at) fazia a
+    // UI perder a ordem manual a cada evento da fila.
+    let mut provider_keys: Vec<&String> = state.queues.keys().collect();
+    provider_keys.sort();
+    let mut queued_items = Vec::new();
+    for provider in provider_keys {
+        let Some(queue) = state.queues.get(provider) else {
+            continue;
+        };
+        queued_items.extend(queue.iter().map(|job| SourceSyncQueueItem {
             source_id: job.source_id.clone(),
             provider: job.provider.clone(),
             handle: job.handle.clone(),
@@ -1057,10 +1087,8 @@ fn build_queue_status(state: &SourceSyncQueueState) -> SourceSyncQueueStatus {
             progress_detail: None,
             progress_indeterminate: false,
             downloaded_items: None,
-        })
-        .collect::<Vec<_>>();
-    // Ordem estável (várias sub-filas): por instante de enfileiramento.
-    queued_items.sort_by(|a, b| a.queued_at.cmp(&b.queued_at));
+        }));
+    }
 
     let mut running_items = state
         .active_jobs
@@ -1305,6 +1333,6 @@ mod tests {
         assert!(state.workers_running.contains("instagram"));
         assert_eq!(state.queues.get("instagram").map(|q| q.len()), Some(1));
         // A fila do TikTok nao foi tocada.
-        assert!(state.queues.get("tiktok").is_none());
+        assert!(!state.queues.contains_key("tiktok"));
     }
 }

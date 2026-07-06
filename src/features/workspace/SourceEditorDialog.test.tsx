@@ -546,20 +546,22 @@ describe('SourceEditorDialog', () => {
     expect(screen.queryByRole('button', { name: /^delete$/i })).toBeNull()
   })
 
-  it('applies dependent enabled state for special path and script fields', () => {
+  it('keeps special path editable independently of the text folder toggle', () => {
     renderDialog()
 
     fireEvent.click(screen.getByRole('tab', { name: /sync/i }))
 
-    const specialPathInput = screen.getByLabelText(/^special path/i) as HTMLInputElement
+    // Special path é o override da RAIZ de mídia do perfil, não da pasta de
+    // texto: fica sempre editável, dentro do card Storage.
+    const specialPathInput = screen.getByRole('textbox', { name: 'Special path' }) as HTMLInputElement
     const textSpecialFolderToggle = screen.getByRole('checkbox', { name: /text special folder/i }) as HTMLInputElement
-    const scriptInput = screen.getByLabelText(/^script/i) as HTMLInputElement
+    const scriptInput = screen.getByRole('textbox', { name: 'Script' }) as HTMLInputElement
     const scriptToggle = screen.getByRole('checkbox', { name: /enable post-sync script/i }) as HTMLInputElement
 
     expect(textSpecialFolderToggle.checked).toBe(true)
     expect(specialPathInput.disabled).toBe(false)
     fireEvent.click(textSpecialFolderToggle)
-    expect(specialPathInput.disabled).toBe(true)
+    expect(specialPathInput.disabled).toBe(false)
 
     expect(scriptToggle.checked).toBe(false)
     expect(scriptInput.disabled).toBe(true)
@@ -615,6 +617,7 @@ describe('SourceEditorDialog', () => {
     const likedVideosLimit = screen.getByRole('spinbutton', { name: 'Liked videos limit' }) as HTMLInputElement
     const incrementalLikes = screen.getByRole('checkbox', { name: 'Incremental liked videos' }) as HTMLInputElement
     const knownPages = screen.getByRole('spinbutton', { name: 'Known pages before stopping' }) as HTMLInputElement
+    const collectStats = screen.getByRole('checkbox', { name: 'Collect media stats' }) as HTMLInputElement
     const downloadFrom = screen.getByLabelText('Download from') as HTMLInputElement
     expect(likedVideos).toBeTruthy()
     expect(likedVideosLimit.value).toBe('100')
@@ -623,6 +626,10 @@ describe('SourceEditorDialog', () => {
     expect(incrementalLikes.disabled).toBe(true)
     expect(knownPages.value).toBe('3')
     expect(knownPages.disabled).toBe(true)
+    expect(collectStats.checked).toBe(true)
+    // O refresh de stats de mídia existente é uma ação pontual (menu de
+    // contexto / Profile View), não mais uma opção persistida da aba Sync.
+    expect(screen.queryByRole('checkbox', { name: 'Refresh existing media stats' })).toBeNull()
     expect(downloadFrom.type).toBe('text')
     expect(screen.getByRole('button', { name: 'Pick Download from' })).toBeTruthy()
     expect(screen.getByText(/files are saved to this profile's Liked\/ subfolder/i)).toBeTruthy()

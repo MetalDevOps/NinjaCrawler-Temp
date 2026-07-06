@@ -16,6 +16,10 @@ use crate::infrastructure::connector_debug;
 /// App id público da web do Instagram, usado em consultas anônimas de identidade.
 const INSTAGRAM_PUBLIC_APP_ID: &str = "936619743392459";
 const INSTAGRAM_PUBLIC_ASBD_ID: &str = "129477";
+/// Instagram's Relay GraphQL endpoint. It only accepts POST requests with the
+/// query parameters in a form-urlencoded body; a GET with the same parameters in
+/// the query string is rejected with `400 Bad Request` (an HTML error page).
+const INSTAGRAM_GRAPHQL_ENDPOINT: &str = "https://www.instagram.com/api/graphql";
 
 #[derive(Clone)]
 pub struct SessionCookie {
@@ -85,8 +89,16 @@ pub struct InstagramConnectorRequest {
     pub download_saved_posts: bool,
     pub post_page_size: u32,
     pub skip_errors: bool,
+    /// Termos que anulam o `skip_errors`: um erro genérico contendo qualquer
+    /// um deles falha a seção mesmo com skip ligado (SCrawler "skip errors
+    /// exclude").
+    pub skip_errors_exclude: Vec<String>,
+    /// `false` silencia (no resumo/log) os erros de seção que foram pulados.
+    pub log_skipped_errors: bool,
+    /// Avisa quando a seção Tagged devolve mais que N posts (0 = desligado).
+    pub tagged_notify_limit: u32,
     pub ignore_stories_560_errors: bool,
-    pub request_delay_ms: u64,
+    pub pacing: InstagramPacing,
     pub timeout_secs: u64,
     pub download_images: bool,
     pub download_videos: bool,
@@ -165,12 +177,37 @@ pub struct InstagramProgress {
     pub indeterminate: bool,
 }
 
+/// Pacing dos requests do Instagram, espelhando os timers do SCrawler:
+/// um delay base em todo request (`requestAnyMs`), um delay extra a cada
+/// `requestCounter` requests (`requestMs`) e uma pausa entre páginas na
+/// listagem de posts (`postsLimitMs`).
+#[derive(Clone, Copy)]
+pub struct InstagramPacing {
+    pub base_delay_ms: u64,
+    pub extra_delay_ms: u64,
+    pub counter_threshold: u32,
+    pub page_delay_ms: u64,
+}
+
+impl InstagramPacing {
+    /// Sem espera alguma (probes e testes).
+    pub fn none() -> Self {
+        Self {
+            base_delay_ms: 0,
+            extra_delay_ms: 0,
+            counter_threshold: 0,
+            page_delay_ms: 0,
+        }
+    }
+}
+
 struct InstagramClient {
     client: Client,
     cookie_header: String,
     headers: InstagramAuthHeaders,
     header_mode: InstagramHeaderMode,
-    request_delay: Duration,
+    pacing: InstagramPacing,
+    request_count: u64,
     last_request_at: Option<Instant>,
 }
 
@@ -303,7 +340,7 @@ impl InstagramClient {
         cookies: &[SessionCookie],
         headers: InstagramAuthHeaders,
         timeout_secs: u64,
-        request_delay_ms: u64,
+        pacing: InstagramPacing,
     ) -> Result<Self, String> {
         let client = Client::builder()
             .timeout(Duration::from_secs(timeout_secs.max(10)))
@@ -315,7 +352,8 @@ impl InstagramClient {
             cookie_header: build_cookie_header(cookies),
             headers,
             header_mode: InstagramHeaderMode::BrowserLike,
-            request_delay: Duration::from_millis(request_delay_ms),
+            pacing,
+            request_count: 0,
             last_request_at: None,
         })
     }
@@ -354,6 +392,116 @@ impl InstagramClient {
 
         serde_json::from_str(&body)
             .map_err(|error| format!("Instagram JSON decode failed for '{url}': {error}"))
+    }
+
+    /// POSTs a persisted (`doc_id`) GraphQL query to Instagram's Relay endpoint.
+    /// The parameters go in a form-urlencoded body — the endpoint rejects the GET
+    /// equivalent with `400 Bad Request` — mirroring what the web client sends.
+    fn post_graphql_json(
+        &mut self,
+        doc_id: &str,
+        lsd: &str,
+        dtsg: &str,
+        friendly_name: &str,
+        variables: &str,
+        referer: Option<&str>,
+    ) -> Result<Value, String> {
+        let acting_user_id = cookie_value(&self.cookie_header, "ds_user_id");
+        let body = build_graphql_body(
+            doc_id,
+            lsd,
+            dtsg,
+            friendly_name,
+            variables,
+            acting_user_id.as_deref(),
+        );
+        let extra_headers = [
+            ("x-fb-friendly-name", friendly_name.to_string()),
+            ("x-fb-lsd", lsd.to_string()),
+        ];
+
+        let (mut status, mut response_body) =
+            self.send_graphql_post(&body, referer, self.header_mode, &extra_headers)?;
+
+        if status == reqwest::StatusCode::BAD_REQUEST
+            && response_body
+                .to_ascii_lowercase()
+                .contains("useragent mismatch")
+            && self.header_mode != InstagramHeaderMode::Relaxed
+        {
+            self.header_mode = InstagramHeaderMode::Relaxed;
+            let (retry_status, retry_body) =
+                self.send_graphql_post(&body, referer, self.header_mode, &extra_headers)?;
+            status = retry_status;
+            response_body = retry_body;
+        }
+
+        if !status.is_success() {
+            return Err(format!(
+                "Instagram request '{INSTAGRAM_GRAPHQL_ENDPOINT}' returned {}: {}",
+                status,
+                truncate_for_error(&response_body)
+            ));
+        }
+
+        serde_json::from_str(&response_body).map_err(|error| {
+            format!("Instagram JSON decode failed for '{INSTAGRAM_GRAPHQL_ENDPOINT}': {error}")
+        })
+    }
+
+    fn send_graphql_post(
+        &mut self,
+        body: &str,
+        referer: Option<&str>,
+        header_mode: InstagramHeaderMode,
+        extra_headers: &[(&str, String)],
+    ) -> Result<(reqwest::StatusCode, String), String> {
+        self.wait_for_pacing();
+        connector_debug::append_current(
+            "instagram-http",
+            "call",
+            "POST graphql",
+            format!(
+                "POST {INSTAGRAM_GRAPHQL_ENDPOINT}\nReferer: {}\nHeader-Mode: {}\n\n{body}",
+                referer.unwrap_or("-"),
+                if header_mode == InstagramHeaderMode::BrowserLike {
+                    "browser-like"
+                } else {
+                    "relaxed"
+                }
+            ),
+        );
+
+        let mut request = self.client.post(INSTAGRAM_GRAPHQL_ENDPOINT);
+        request = self.apply_headers(request, referer, header_mode);
+        request = request.header("content-type", "application/x-www-form-urlencoded");
+        for (name, value) in extra_headers {
+            request = request.header(*name, value);
+        }
+        request = request.body(body.to_string());
+
+        let response = request.send().map_err(|error| {
+            connector_debug::append_current(
+                "instagram-http",
+                "error",
+                "POST graphql",
+                error.to_string(),
+            );
+            format!("Instagram request failed for '{INSTAGRAM_GRAPHQL_ENDPOINT}': {error}")
+        })?;
+        self.absorb_response_headers(response.headers());
+        let status = response.status();
+        let body = response.text().map_err(|error| {
+            format!("Instagram response read failed for '{INSTAGRAM_GRAPHQL_ENDPOINT}': {error}")
+        })?;
+        self.last_request_at = Some(Instant::now());
+        connector_debug::append_current(
+            "instagram-http",
+            "response",
+            "POST graphql",
+            format!("HTTP {status}\n\n{body}"),
+        );
+        Ok((status, body))
     }
 
     fn download_file(
@@ -562,16 +710,35 @@ impl InstagramClient {
         }
     }
 
-    fn wait_for_pacing(&self) {
-        if self.request_delay.is_zero() {
+    fn wait_for_pacing(&mut self) {
+        self.request_count += 1;
+        let mut delay = Duration::from_millis(self.pacing.base_delay_ms);
+        // A cada `counter_threshold` requests, soma o delay extra (requestMs),
+        // espelhando o "request timer counter" do SCrawler.
+        if self.pacing.counter_threshold > 0
+            && self.pacing.extra_delay_ms > 0
+            && self
+                .request_count
+                .is_multiple_of(u64::from(self.pacing.counter_threshold))
+        {
+            delay += Duration::from_millis(self.pacing.extra_delay_ms);
+        }
+        if delay.is_zero() {
             return;
         }
 
         if let Some(last_request_at) = self.last_request_at {
             let elapsed = last_request_at.elapsed();
-            if elapsed < self.request_delay {
-                thread::sleep(self.request_delay - elapsed);
+            if elapsed < delay {
+                thread::sleep(delay - elapsed);
             }
+        }
+    }
+
+    /// Pausa entre páginas na listagem de posts (`postsLimitMs`).
+    fn wait_between_post_pages(&self) {
+        if self.pacing.page_delay_ms > 0 {
+            thread::sleep(Duration::from_millis(self.pacing.page_delay_ms));
         }
     }
 }
@@ -590,7 +757,7 @@ where
         &request.cookies,
         request.headers.clone(),
         request.timeout_secs,
-        request.request_delay_ms,
+        request.pacing,
     )?;
     let profile = load_profile(&mut client, &request.username)?;
     let profile_description =
@@ -647,14 +814,20 @@ where
             Err(error) => {
                 handle_section_error(
                     error,
-                    effective_request.skip_errors,
-                    effective_request.ignore_stories_560_errors,
-                    effective_request.use_gql,
+                    SectionErrorPolicy {
+                        skip_errors: effective_request.skip_errors,
+                        force_fail_terms: &effective_request.skip_errors_exclude,
+                        log_skipped_errors: effective_request.log_skipped_errors,
+                        ignore_stories_560_errors: effective_request.ignore_stories_560_errors,
+                        use_gql: effective_request.use_gql,
+                    },
                     "stories_user",
-                    &mut section_errors,
-                    &mut validation_error,
-                    &mut auth_disabled_sections,
-                    &mut rate_limited,
+                    SectionErrorSink {
+                        section_errors: &mut section_errors,
+                        validation_error: &mut validation_error,
+                        auth_disabled_sections: &mut auth_disabled_sections,
+                        rate_limited: &mut rate_limited,
+                    },
                 )?;
             }
         }
@@ -704,14 +877,20 @@ where
             Err(error) => {
                 handle_section_error(
                     error,
-                    effective_request.skip_errors,
-                    effective_request.ignore_stories_560_errors,
-                    effective_request.use_gql,
+                    SectionErrorPolicy {
+                        skip_errors: effective_request.skip_errors,
+                        force_fail_terms: &effective_request.skip_errors_exclude,
+                        log_skipped_errors: effective_request.log_skipped_errors,
+                        ignore_stories_560_errors: effective_request.ignore_stories_560_errors,
+                        use_gql: effective_request.use_gql,
+                    },
                     "timeline",
-                    &mut section_errors,
-                    &mut validation_error,
-                    &mut auth_disabled_sections,
-                    &mut rate_limited,
+                    SectionErrorSink {
+                        section_errors: &mut section_errors,
+                        validation_error: &mut validation_error,
+                        auth_disabled_sections: &mut auth_disabled_sections,
+                        rate_limited: &mut rate_limited,
+                    },
                 )?;
             }
         }
@@ -762,14 +941,20 @@ where
             Err(error) => {
                 handle_section_error(
                     error,
-                    effective_request.skip_errors,
-                    effective_request.ignore_stories_560_errors,
-                    effective_request.use_gql,
+                    SectionErrorPolicy {
+                        skip_errors: effective_request.skip_errors,
+                        force_fail_terms: &effective_request.skip_errors_exclude,
+                        log_skipped_errors: effective_request.log_skipped_errors,
+                        ignore_stories_560_errors: effective_request.ignore_stories_560_errors,
+                        use_gql: effective_request.use_gql,
+                    },
                     "reels",
-                    &mut section_errors,
-                    &mut validation_error,
-                    &mut auth_disabled_sections,
-                    &mut rate_limited,
+                    SectionErrorSink {
+                        section_errors: &mut section_errors,
+                        validation_error: &mut validation_error,
+                        auth_disabled_sections: &mut auth_disabled_sections,
+                        rate_limited: &mut rate_limited,
+                    },
                 )?;
             }
         }
@@ -793,14 +978,20 @@ where
         ) {
             handle_section_error(
                 error,
-                effective_request.skip_errors,
-                effective_request.ignore_stories_560_errors,
-                effective_request.use_gql,
+                SectionErrorPolicy {
+                    skip_errors: effective_request.skip_errors,
+                    force_fail_terms: &effective_request.skip_errors_exclude,
+                    log_skipped_errors: effective_request.log_skipped_errors,
+                    ignore_stories_560_errors: effective_request.ignore_stories_560_errors,
+                    use_gql: effective_request.use_gql,
+                },
                 "stories",
-                &mut section_errors,
-                &mut validation_error,
-                &mut auth_disabled_sections,
-                &mut rate_limited,
+                SectionErrorSink {
+                    section_errors: &mut section_errors,
+                    validation_error: &mut validation_error,
+                    auth_disabled_sections: &mut auth_disabled_sections,
+                    rate_limited: &mut rate_limited,
+                },
             )?;
         } else {
             completed_discovery_sections += 1;
@@ -834,14 +1025,20 @@ where
         ) {
             handle_section_error(
                 error,
-                effective_request.skip_errors,
-                effective_request.ignore_stories_560_errors,
-                effective_request.use_gql,
+                SectionErrorPolicy {
+                    skip_errors: effective_request.skip_errors,
+                    force_fail_terms: &effective_request.skip_errors_exclude,
+                    log_skipped_errors: effective_request.log_skipped_errors,
+                    ignore_stories_560_errors: effective_request.ignore_stories_560_errors,
+                    use_gql: effective_request.use_gql,
+                },
                 "stories_user",
-                &mut section_errors,
-                &mut validation_error,
-                &mut auth_disabled_sections,
-                &mut rate_limited,
+                SectionErrorSink {
+                    section_errors: &mut section_errors,
+                    validation_error: &mut validation_error,
+                    auth_disabled_sections: &mut auth_disabled_sections,
+                    rate_limited: &mut rate_limited,
+                },
             )?;
         } else {
             completed_discovery_sections += 1;
@@ -874,6 +1071,17 @@ where
         ) {
             Ok(tagged_items) => {
                 completed_discovery_sections += 1;
+                // Aviso operacional: contagem alta de tagged costuma indicar
+                // spam de marcações; o limite vem das settings da conta.
+                if effective_request.tagged_notify_limit > 0
+                    && tagged_items.len() > effective_request.tagged_notify_limit as usize
+                {
+                    section_errors.push(format!(
+                        "Tagged: {} post(s) exceed the notify limit of {}.",
+                        tagged_items.len(),
+                        effective_request.tagged_notify_limit
+                    ));
+                }
                 manifest.sections.push(build_manifest_section(
                     "tagged",
                     section_label("tagged").to_string(),
@@ -901,14 +1109,20 @@ where
             Err(error) => {
                 handle_section_error(
                     error,
-                    effective_request.skip_errors,
-                    effective_request.ignore_stories_560_errors,
-                    effective_request.use_gql,
+                    SectionErrorPolicy {
+                        skip_errors: effective_request.skip_errors,
+                        force_fail_terms: &effective_request.skip_errors_exclude,
+                        log_skipped_errors: effective_request.log_skipped_errors,
+                        ignore_stories_560_errors: effective_request.ignore_stories_560_errors,
+                        use_gql: effective_request.use_gql,
+                    },
                     "tagged",
-                    &mut section_errors,
-                    &mut validation_error,
-                    &mut auth_disabled_sections,
-                    &mut rate_limited,
+                    SectionErrorSink {
+                        section_errors: &mut section_errors,
+                        validation_error: &mut validation_error,
+                        auth_disabled_sections: &mut auth_disabled_sections,
+                        rate_limited: &mut rate_limited,
+                    },
                 )?;
             }
         }
@@ -943,14 +1157,20 @@ where
         ) {
             handle_section_error(
                 error,
-                effective_request.skip_errors,
-                effective_request.ignore_stories_560_errors,
-                effective_request.use_gql,
+                SectionErrorPolicy {
+                    skip_errors: effective_request.skip_errors,
+                    force_fail_terms: &effective_request.skip_errors_exclude,
+                    log_skipped_errors: effective_request.log_skipped_errors,
+                    ignore_stories_560_errors: effective_request.ignore_stories_560_errors,
+                    use_gql: effective_request.use_gql,
+                },
                 &section.media_section,
-                &mut section_errors,
-                &mut validation_error,
-                &mut auth_disabled_sections,
-                &mut rate_limited,
+                SectionErrorSink {
+                    section_errors: &mut section_errors,
+                    validation_error: &mut validation_error,
+                    auth_disabled_sections: &mut auth_disabled_sections,
+                    rate_limited: &mut rate_limited,
+                },
             )?;
         }
     }
@@ -1009,7 +1229,7 @@ where
         &request.cookies,
         request.headers.clone(),
         request.timeout_secs,
-        request.request_delay_ms,
+        request.pacing,
     )?;
     let items = load_saved_posts_items(&mut client, request.post_page_size)?;
     let mut downloaded_media = Vec::new();
@@ -1022,23 +1242,31 @@ where
     if let Err(error) = download_items_section(
         &mut client,
         request,
-        "saved_posts",
-        &request.saved_posts_root,
-        items,
-        None,
+        SectionDownloadInput {
+            media_section: "saved_posts",
+            section_root: &request.saved_posts_root,
+            items,
+            profile_user_id: None,
+        },
         &mut downloaded_media,
         &mut progress,
     ) {
         handle_section_error(
             error,
-            request.skip_errors,
-            request.ignore_stories_560_errors,
-            request.use_gql,
+            SectionErrorPolicy {
+                skip_errors: request.skip_errors,
+                force_fail_terms: &request.skip_errors_exclude,
+                log_skipped_errors: request.log_skipped_errors,
+                ignore_stories_560_errors: request.ignore_stories_560_errors,
+                use_gql: request.use_gql,
+            },
             "saved_posts",
-            &mut section_errors,
-            &mut validation_error,
-            &mut auth_disabled_sections,
-            &mut rate_limited,
+            SectionErrorSink {
+                section_errors: &mut section_errors,
+                validation_error: &mut validation_error,
+                auth_disabled_sections: &mut auth_disabled_sections,
+                rate_limited: &mut rate_limited,
+            },
         )?;
     }
 
@@ -1417,7 +1645,7 @@ pub fn resolve_profile_identity(
         &request.cookies,
         request.headers.clone(),
         request.timeout_secs,
-        request.request_delay_ms,
+        request.pacing,
     )?;
     let username = request.username.trim();
     let normalized_user_id_hint = user_id_hint
@@ -1474,21 +1702,20 @@ fn resolve_profile_identity_by_user_id_fallback(
         &[],
         public_identity_headers(&request.headers),
         request.timeout_secs,
-        request.request_delay_ms,
+        request.pacing,
     )?;
     match load_profile_identity_by_user_id(&mut public_client, username, user_id) {
         Ok(identity) => Ok(identity),
-        Err(public_error) => load_profile_identity_by_user_id(
-            authenticated_client,
-            username,
-            user_id,
-        )
-            .map_err(|auth_error| {
-                format!(
-                    "{primary_error} | fallback by user id '{user_id}' failed \
+        Err(public_error) => {
+            load_profile_identity_by_user_id(authenticated_client, username, user_id).map_err(
+                |auth_error| {
+                    format!(
+                        "{primary_error} | fallback by user id '{user_id}' failed \
                      (public lookup: {public_error}; authenticated lookup: {auth_error})"
-                )
-            }),
+                    )
+                },
+            )
+        }
     }
 }
 
@@ -2249,15 +2476,14 @@ fn load_profile_description_gql(
         escape_json(user_id)
     );
     let referer = format!("https://www.instagram.com/{username}/");
-    let url = build_graphql_url("7381344031985950", &lsd, &dtsg, friendly_name, &variables);
     let payload = client
-        .get_json_with_extra_headers(
-            &url,
+        .post_graphql_json(
+            "7381344031985950",
+            &lsd,
+            &dtsg,
+            friendly_name,
+            &variables,
             Some(&referer),
-            &[
-                ("x-fb-friendly-name", friendly_name.to_string()),
-                ("x-fb-lsd", lsd),
-            ],
         )
         .ok()?;
 
@@ -2350,14 +2576,13 @@ fn load_timeline_items(
                 };
                 let variables =
                     build_timeline_gql_variables(username, page_size, cursor.as_deref());
-                let url = build_graphql_url(doc_id, &lsd, &dtsg, friendly_name, &variables);
-                let payload = match client.get_json_with_extra_headers(
-                    &url,
+                let payload = match client.post_graphql_json(
+                    doc_id,
+                    &lsd,
+                    &dtsg,
+                    friendly_name,
+                    &variables,
                     Some(&format!("https://www.instagram.com/{username}/")),
-                    &[
-                        ("x-fb-friendly-name", friendly_name.to_string()),
-                        ("x-fb-lsd", lsd.clone()),
-                    ],
                 ) {
                     Ok(payload) => payload,
                     Err(error) => {
@@ -2446,6 +2671,7 @@ fn load_timeline_items(
             if next.is_none() {
                 break;
             }
+            client.wait_between_post_pages();
             max_id = next;
         }
     }
@@ -2498,7 +2724,7 @@ fn load_reel_items(
         .reel_items
         .clone()
         .into_iter()
-        .filter(|item| is_clip_product(item))
+        .filter(is_clip_product)
         .collect::<Vec<_>>();
     let mut max_id = None;
 
@@ -2511,23 +2737,13 @@ fn load_reel_items(
                     page_size,
                     gql_cursor.as_deref(),
                 );
-                let url = build_graphql_url(
+                let payload = match client.post_graphql_json(
                     "7191572580905225",
                     &lsd,
                     &dtsg,
                     "PolarisProfileReelsTabContentQuery",
                     &variables,
-                );
-                let payload = match client.get_json_with_extra_headers(
-                    &url,
                     Some("https://www.instagram.com/"),
-                    &[
-                        (
-                            "x-fb-friendly-name",
-                            "PolarisProfileReelsTabContentQuery".to_string(),
-                        ),
-                        ("x-fb-lsd", lsd.clone()),
-                    ],
                 ) {
                     Ok(payload) => payload,
                     Err(error) => {
@@ -2608,6 +2824,7 @@ fn load_reel_items(
         if next.is_none() {
             break;
         }
+        client.wait_between_post_pages();
         max_id = next;
     }
 
@@ -2632,23 +2849,13 @@ fn load_tagged_items(
                     page_size,
                     gql_cursor.as_deref(),
                 );
-                let url = build_graphql_url(
+                let payload = match client.post_graphql_json(
                     "7289408964443685",
                     &lsd,
                     &dtsg,
                     "PolarisProfileTaggedTabContentQuery",
                     &variables,
-                );
-                let payload = match client.get_json_with_extra_headers(
-                    &url,
                     Some("https://www.instagram.com/"),
-                    &[
-                        (
-                            "x-fb-friendly-name",
-                            "PolarisProfileTaggedTabContentQuery".to_string(),
-                        ),
-                        ("x-fb-lsd", lsd.clone()),
-                    ],
                 ) {
                     Ok(payload) => payload,
                     Err(error) => {
@@ -2733,6 +2940,7 @@ fn load_tagged_items(
         if next.is_none() {
             break;
         }
+        client.wait_between_post_pages();
         max_id = next;
     }
 
@@ -2773,25 +2981,38 @@ fn load_saved_posts_items(
         if next.is_none() {
             break;
         }
+        client.wait_between_post_pages();
         max_id = next;
     }
 
     Ok(items)
 }
 
+/// Seção resolvida pronta para download: nome, pasta destino, itens da API e
+/// (quando conhecido) o user id do perfil.
+struct SectionDownloadInput<'a> {
+    media_section: &'a str,
+    section_root: &'a Path,
+    items: Vec<Value>,
+    profile_user_id: Option<&'a str>,
+}
+
 fn download_items_section<F>(
     client: &mut InstagramClient,
     request: &InstagramConnectorRequest,
-    media_section: &str,
-    section_root: &Path,
-    items: Vec<Value>,
-    profile_user_id: Option<&str>,
+    section: SectionDownloadInput<'_>,
     downloaded_media: &mut Vec<DownloadedInstagramMedia>,
     progress: &mut F,
 ) -> Result<(), String>
 where
     F: FnMut(InstagramProgress),
 {
+    let SectionDownloadInput {
+        media_section,
+        section_root,
+        items,
+        profile_user_id,
+    } = section;
     let referer = format!("https://www.instagram.com/{}/", request.username);
     let assets = collect_media_assets(&items, request, media_section, profile_user_id)?;
     write_text_sidecars_for_items(request, media_section, section_root, &items)?;
@@ -2910,19 +3131,40 @@ fn append_assets_from_item(
     {
         for (index, edge) in edges.iter().enumerate() {
             let child = edge.get("node").unwrap_or(edge);
-            append_single_asset(child, assets, index, request, media_section, post_code.as_deref())?;
+            append_single_asset(
+                child,
+                assets,
+                index,
+                request,
+                media_section,
+                post_code.as_deref(),
+            )?;
         }
         return Ok(());
     }
 
     if let Some(children) = item.get("carousel_media").and_then(Value::as_array) {
         for (index, child) in children.iter().enumerate() {
-            append_single_asset(child, assets, index, request, media_section, post_code.as_deref())?;
+            append_single_asset(
+                child,
+                assets,
+                index,
+                request,
+                media_section,
+                post_code.as_deref(),
+            )?;
         }
         return Ok(());
     }
 
-    append_single_asset(item, assets, 0, request, media_section, post_code.as_deref())
+    append_single_asset(
+        item,
+        assets,
+        0,
+        request,
+        media_section,
+        post_code.as_deref(),
+    )
 }
 
 fn append_single_asset(
@@ -3289,17 +3531,46 @@ fn should_ignore_media_download_error(media_section: &str, error: &str) -> bool 
             .contains("static.cdninstagram.com/rsrc.php/null.")
 }
 
-fn handle_section_error(
-    error: String,
+/// Política de tolerância a erros de seção, derivada do request.
+#[derive(Clone, Copy)]
+struct SectionErrorPolicy<'a> {
     skip_errors: bool,
+    /// Erros genéricos contendo qualquer um destes termos falham mesmo com
+    /// `skip_errors` ligado.
+    force_fail_terms: &'a [String],
+    /// `false` pula silenciosamente (sem registrar no resumo/log).
+    log_skipped_errors: bool,
     ignore_stories_560_errors: bool,
     use_gql: bool,
+}
+
+/// Acumuladores de erro compartilhados por todas as seções de um mesmo sync.
+struct SectionErrorSink<'a> {
+    section_errors: &'a mut Vec<String>,
+    validation_error: &'a mut Option<String>,
+    auth_disabled_sections: &'a mut Vec<String>,
+    rate_limited: &'a mut bool,
+}
+
+fn handle_section_error(
+    error: String,
+    policy: SectionErrorPolicy<'_>,
     section: &str,
-    section_errors: &mut Vec<String>,
-    validation_error: &mut Option<String>,
-    auth_disabled_sections: &mut Vec<String>,
-    rate_limited: &mut bool,
+    sink: SectionErrorSink<'_>,
 ) -> Result<(), String> {
+    let SectionErrorPolicy {
+        skip_errors,
+        force_fail_terms,
+        log_skipped_errors,
+        ignore_stories_560_errors,
+        use_gql,
+    } = policy;
+    let SectionErrorSink {
+        section_errors,
+        validation_error,
+        auth_disabled_sections,
+        rate_limited,
+    } = sink;
     let message = format!("{}: {}", section_label(section), error);
     if extract_http_status_code(&error) == Some(429) {
         *rate_limited = true;
@@ -3321,13 +3592,22 @@ fn handle_section_error(
             Err(message)
         }
         SectionErrorDisposition::AlwaysWarn => {
-            section_errors.push(message);
+            if log_skipped_errors {
+                section_errors.push(message);
+            }
             Ok(())
         }
         SectionErrorDisposition::ForceFail => Err(message),
         SectionErrorDisposition::Generic => {
-            if skip_errors {
-                section_errors.push(message);
+            let error_lowered = error.to_ascii_lowercase();
+            let force_fail = force_fail_terms.iter().any(|term| {
+                let term = term.trim();
+                !term.is_empty() && error_lowered.contains(&term.to_ascii_lowercase())
+            });
+            if skip_errors && !force_fail {
+                if log_skipped_errors {
+                    section_errors.push(message);
+                }
                 Ok(())
             } else {
                 Err(message)
@@ -3525,21 +3805,57 @@ fn hydrate_tagged_items(
     Ok(hydrated_items)
 }
 
-fn build_graphql_url(
+/// Builds the form-urlencoded body for a persisted GraphQL query, matching the
+/// fields Instagram's web client posts. `av` (the acting user id, read from the
+/// `ds_user_id` cookie) and `jazoest` (a checksum of `fb_dtsg`) are required by
+/// the endpoint alongside the query itself.
+fn build_graphql_body(
     doc_id: &str,
     lsd: &str,
     dtsg: &str,
     friendly_name: &str,
     variables_json: &str,
+    acting_user_id: Option<&str>,
 ) -> String {
-    format!(
-        "https://www.instagram.com/api/graphql?doc_id={}&lsd={}&fb_dtsg={}&fb_api_req_friendly_name={}&variables={}",
-        percent_encode_component(doc_id),
-        percent_encode_component(lsd),
-        percent_encode_component(dtsg),
-        percent_encode_component(friendly_name),
-        percent_encode_component(variables_json),
-    )
+    let mut body = String::new();
+    if let Some(av) = acting_user_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body.push_str("av=");
+        body.push_str(&percent_encode_component(av));
+        body.push('&');
+    }
+    body.push_str("__comet_req=7&fb_dtsg=");
+    body.push_str(&percent_encode_component(dtsg));
+    body.push_str("&jazoest=");
+    body.push_str(&percent_encode_component(&compute_jazoest(dtsg)));
+    body.push_str("&lsd=");
+    body.push_str(&percent_encode_component(lsd));
+    body.push_str("&fb_api_caller_class=RelayModern&fb_api_req_friendly_name=");
+    body.push_str(&percent_encode_component(friendly_name));
+    body.push_str("&doc_id=");
+    body.push_str(&percent_encode_component(doc_id));
+    body.push_str("&variables=");
+    body.push_str(&percent_encode_component(variables_json));
+    body.push_str("&server_timestamps=true");
+    body
+}
+
+/// Facebook/Instagram anti-CSRF checksum derived from `fb_dtsg`: the literal
+/// `2` followed by the sum of the token's byte values.
+fn compute_jazoest(token: &str) -> String {
+    let sum: u32 = token.bytes().map(u32::from).sum();
+    format!("2{sum}")
+}
+
+fn cookie_value(cookie_header: &str, name: &str) -> Option<String> {
+    cookie_header
+        .split(';')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(key, _)| key.trim() == name)
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn escape_json(value: &str) -> String {
@@ -3739,19 +4055,94 @@ fn fallback_media_stem(item_id: &str, variant_index: usize) -> String {
     }
 }
 
+fn truncate_for_error(input: &str) -> String {
+    const MAX_LEN: usize = 220;
+    let trimmed = input.trim();
+    if trimmed.len() <= MAX_LEN {
+        trimmed.to_string()
+    } else {
+        format!("{}...", &trimmed[..MAX_LEN])
+    }
+}
+
+fn section_label(section: &str) -> &'static str {
+    match section {
+        "timeline" => "Timeline",
+        "reels" => "Reels",
+        "stories" => "Stories",
+        "stories_user" => "Stories (user)",
+        "tagged" => "Tagged",
+        "saved_posts" => "Saved posts",
+        _ => "Instagram",
+    }
+}
+
+fn is_clip_product(item: &Value) -> bool {
+    item.get("product_type")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("clips"))
+        || item
+            .get("media_type")
+            .and_then(Value::as_i64)
+            .is_some_and(|value| value == 2 && item.get("clips_metadata").is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        append_single_asset, best_image_url, build_manifest_section, build_media_file_name,
-        collect_media_assets, execute_manifest_section, extract_reels_payload_items,
-        normalize_profile_sync_manifest,
+        append_single_asset, best_image_url, build_graphql_body, build_manifest_section,
+        build_media_file_name, collect_media_assets, compute_jazoest, cookie_value,
+        execute_manifest_section, extract_reels_payload_items, normalize_profile_sync_manifest,
         parse_profile_description, parse_profile_description_from_user,
         provider_media_identity_from_url, public_identity_headers, resolve_destination_path,
         should_ignore_media_download_error, DownloadedInstagramMedia, InstagramAuthHeaders,
         InstagramClient, InstagramConnectorRequest, InstagramManifestPost,
-        InstagramMediaFileNamingMode, InstagramSectionSelection, InstagramSyncManifest, MediaAsset,
-        PlannedMediaAsset,
+        InstagramMediaFileNamingMode, InstagramPacing, InstagramSectionSelection,
+        InstagramSyncManifest, MediaAsset, PlannedMediaAsset,
     };
+
+    #[test]
+    fn compute_jazoest_sums_token_bytes_with_prefix() {
+        // '1'..'5' → 49+50+51+52+53 = 255.
+        assert_eq!(compute_jazoest("12345"), "2255");
+    }
+
+    #[test]
+    fn cookie_value_reads_named_cookie() {
+        let header = "csrftoken=abc; ds_user_id=17841400000000000; sessionid=xyz";
+        assert_eq!(
+            cookie_value(header, "ds_user_id").as_deref(),
+            Some("17841400000000000")
+        );
+        assert_eq!(cookie_value(header, "missing"), None);
+    }
+
+    #[test]
+    fn build_graphql_body_posts_query_fields() {
+        let body = build_graphql_body(
+            "123",
+            "the-lsd",
+            "the-dtsg",
+            "PolarisProfileReelsTabContentQuery",
+            "{\"target_user_id\":\"42\"}",
+            Some("17841400000000000"),
+        );
+
+        assert!(body.contains("doc_id=123"));
+        assert!(body.contains("fb_dtsg=the-dtsg"));
+        assert!(body.contains("lsd=the-lsd"));
+        assert!(body.contains("av=17841400000000000"));
+        assert!(body.contains("fb_api_req_friendly_name=PolarisProfileReelsTabContentQuery"));
+        // `variables` must be percent-encoded so the JSON braces survive transport.
+        assert!(body.contains("variables=%7B%22target_user_id%22%3A%2242%22%7D"));
+        assert!(body.contains(&format!("jazoest={}", compute_jazoest("the-dtsg"))));
+    }
+
+    #[test]
+    fn build_graphql_body_omits_av_without_user_cookie() {
+        let body = build_graphql_body("123", "l", "d", "Friendly", "{}", None);
+        assert!(!body.contains("av="));
+    }
     use serde_json::json;
     use std::collections::HashSet;
     use std::fs;
@@ -3811,8 +4202,11 @@ mod tests {
             download_saved_posts: false,
             post_page_size: 30,
             skip_errors: true,
+            skip_errors_exclude: Vec::new(),
+            log_skipped_errors: true,
+            tagged_notify_limit: 0,
             ignore_stories_560_errors: false,
-            request_delay_ms: 0,
+            pacing: InstagramPacing::none(),
             timeout_secs: 30,
             download_images: true,
             download_videos: true,
@@ -4031,9 +4425,16 @@ mod tests {
             "mp4",
             None,
         );
+        // O prefixo usa o fuso local; calcula o esperado da mesma forma para o
+        // teste não depender do timezone da máquina.
+        let expected_prefix = chrono::TimeZone::timestamp_opt(&chrono::Local, 1_711_800_191, 0)
+            .single()
+            .expect("timestamp should resolve")
+            .format("%Y-%m-%d %H.%M.%S")
+            .to_string();
         assert_eq!(
             file_name,
-            "2024-04-05 20.29.51 3339838382976122123_46124578107.mp4"
+            format!("{expected_prefix} 3339838382976122123_46124578107.mp4")
         );
     }
 
@@ -4099,12 +4500,14 @@ mod tests {
         )
         .expect("default normalization should succeed");
 
-        assert_eq!(default_manifest.sections[0].posts.len(), 1);
-        assert_eq!(
-            default_manifest.sections[0].posts[0].planned_assets.len(),
-            0
-        );
+        // Um post cujos assets caíram todos no ledger é dropado do manifest e
+        // contado como indisponível (não fica um post vazio para trás).
+        assert_eq!(default_manifest.sections[0].posts.len(), 0);
         assert_eq!(default_manifest.sections[0].skipped_existing_asset_count, 1);
+        assert_eq!(
+            default_manifest.sections[0].skipped_unavailable_post_count,
+            1
+        );
 
         let mut missing_only_request = sample_request();
         missing_only_request.missing_only = true;
@@ -4187,9 +4590,9 @@ mod tests {
         normalize_profile_sync_manifest(&request, &mut manifest, &mut |_| {}, &|| false)
             .expect("normalization should succeed");
 
-        assert_eq!(manifest.sections[0].posts.len(), 1);
-        assert_eq!(manifest.sections[0].posts[0].planned_assets.len(), 0);
+        assert_eq!(manifest.sections[0].posts.len(), 0);
         assert_eq!(manifest.sections[0].skipped_existing_asset_count, 1);
+        assert_eq!(manifest.sections[0].skipped_unavailable_post_count, 1);
 
         fs::remove_dir_all(&temp_root).expect("temp root should be removed");
     }
@@ -4448,8 +4851,13 @@ mod tests {
                 write_text_sidecar: false,
             }],
         };
-        let mut client = InstagramClient::new(&[], InstagramAuthHeaders::default(), 1, 0)
-            .expect("client should build");
+        let mut client = InstagramClient::new(
+            &[],
+            InstagramAuthHeaders::default(),
+            1,
+            InstagramPacing::none(),
+        )
+        .expect("client should build");
         let mut downloaded_media = Vec::<DownloadedInstagramMedia>::new();
 
         let error = execute_manifest_section(
@@ -4466,36 +4874,4 @@ mod tests {
         assert_eq!(error, "source sync cancelled by user");
         assert!(downloaded_media.is_empty());
     }
-}
-
-fn truncate_for_error(input: &str) -> String {
-    const MAX_LEN: usize = 220;
-    let trimmed = input.trim();
-    if trimmed.len() <= MAX_LEN {
-        trimmed.to_string()
-    } else {
-        format!("{}...", &trimmed[..MAX_LEN])
-    }
-}
-
-fn section_label(section: &str) -> &'static str {
-    match section {
-        "timeline" => "Timeline",
-        "reels" => "Reels",
-        "stories" => "Stories",
-        "stories_user" => "Stories (user)",
-        "tagged" => "Tagged",
-        "saved_posts" => "Saved posts",
-        _ => "Instagram",
-    }
-}
-
-fn is_clip_product(item: &Value) -> bool {
-    item.get("product_type")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value.eq_ignore_ascii_case("clips"))
-        || item
-            .get("media_type")
-            .and_then(Value::as_i64)
-            .is_some_and(|value| value == 2 && item.get("clips_metadata").is_some())
 }

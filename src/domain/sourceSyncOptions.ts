@@ -218,6 +218,8 @@ export const DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS: TikTokSourceSyncOptions = {
   likedVideosLimit: 100,
   likedVideosIncremental: true,
   likedVideosKnownPageThreshold: 3,
+  collectMediaStats: true,
+  refreshExistingMediaStats: false,
   downloadVideos: true,
   downloadPhotos: true,
   useNativeTitle: false,
@@ -253,6 +255,9 @@ export function createTikTokSourceSyncOptions(
           ?? 3,
       ),
     ),
+    collectMediaStats: overrides?.collectMediaStats ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.collectMediaStats,
+    refreshExistingMediaStats:
+      overrides?.refreshExistingMediaStats ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.refreshExistingMediaStats,
     downloadVideos: overrides?.downloadVideos ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.downloadVideos,
     downloadPhotos: overrides?.downloadPhotos ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.downloadPhotos,
     useNativeTitle: overrides?.useNativeTitle ?? DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.useNativeTitle,

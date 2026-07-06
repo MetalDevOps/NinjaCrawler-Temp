@@ -76,6 +76,7 @@ import type {
   SingleVideoQueueStatus,
   SourceMediaGallery,
   MediaGalleryPost,
+  MediaThumbnailQueueStatus,
   SchedulerSet,
   SchedulerGroup,
   SchedulerGroupUpsert,
@@ -875,14 +876,12 @@ function normalizeSchedulerPlanCriteria(value: unknown, targetFilter = ''): Sche
     sitesExcluded: stringArray(pick(record, 'sitesExcluded', 'sites_excluded')).map((entry) => normalizeProviderKey(entry)),
     groupIdsIncluded: stringArray(pick(record, 'groupIdsIncluded', 'group_ids_included')),
     groupIdsExcluded: stringArray(pick(record, 'groupIdsExcluded', 'group_ids_excluded')),
-    groupsOnly: booleanValue(record, ['groupsOnly', 'groups_only'], false),
     usersCount: optionalNumberValue(record, ['usersCount', 'users_count']),
     daysNumber: optionalNumberValue(record, ['daysNumber', 'days_number']),
     daysIsDownloaded: booleanValue(record, ['daysIsDownloaded', 'days_is_downloaded'], false),
     dateFrom: optionalStringValue(record, ['dateFrom', 'date_from']),
     dateTo: optionalStringValue(record, ['dateTo', 'date_to']),
     dateInRange: booleanValue(record, ['dateInRange', 'date_in_range'], true),
-    dateMode: optionalStringValue(record, ['dateMode', 'date_mode']) as SchedulerPlanCriteria['dateMode'],
     advancedExpression: optionalStringValue(record, ['advancedExpression', 'advanced_expression']) ?? targetFilter,
   }
 }
@@ -1614,6 +1613,10 @@ function normalizeTikTokSourceSyncOptions(value: unknown): TikTokSourceSyncOptio
     getReposts: booleanValue(value, ['getReposts', 'get_reposts'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getReposts ?? false),
     getLikedVideos: booleanValue(value, ['getLikedVideos', 'get_liked_videos'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.getLikedVideos ?? false),
     likedVideosLimit: Math.max(0, Math.trunc(numberValue(value, ['likedVideosLimit', 'liked_videos_limit'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.likedVideosLimit ?? 100))),
+    likedVideosIncremental: booleanValue(value, ['likedVideosIncremental', 'liked_videos_incremental'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.likedVideosIncremental ?? true),
+    likedVideosKnownPageThreshold: Math.max(1, Math.trunc(numberValue(value, ['likedVideosKnownPageThreshold', 'liked_videos_known_page_threshold'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.likedVideosKnownPageThreshold ?? 3))),
+    collectMediaStats: booleanValue(value, ['collectMediaStats', 'collect_media_stats'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.collectMediaStats ?? true),
+    refreshExistingMediaStats: booleanValue(value, ['refreshExistingMediaStats', 'refresh_existing_media_stats'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.refreshExistingMediaStats ?? false),
     downloadVideos: booleanValue(value, ['downloadVideos', 'download_videos'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.downloadVideos ?? true),
     downloadPhotos: booleanValue(value, ['downloadPhotos', 'download_photos'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.downloadPhotos ?? true),
     useNativeTitle: booleanValue(value, ['useNativeTitle', 'use_native_title'], DEFAULT_TIKTOK_SOURCE_SYNC_OPTIONS.useNativeTitle ?? false),
@@ -2541,12 +2544,19 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
       postId: optionalStringValue(post, ['postId', 'post_id']),
       postUrl: optionalStringValue(post, ['postUrl', 'post_url']),
       capturedAt: optionalNumberValue(post, ['capturedAt', 'captured_at']),
+      downloadedAt: optionalNumberValue(post, ['downloadedAt', 'downloaded_at']),
+      author: optionalStringValue(post, ['author']),
       mediaType: stringValue(post, ['mediaType', 'media_type'], 'image') as MediaGalleryPost['mediaType'],
       section: stringValue(post, ['section'], 'timeline'),
       albums: Array.isArray(post.albums)
         ? post.albums.filter((album): album is string => typeof album === 'string')
         : [],
       posterPath: optionalStringValue(post, ['posterPath', 'poster_path']),
+      viewCount: optionalNumberValue(post, ['viewCount', 'view_count']),
+      likeCount: optionalNumberValue(post, ['likeCount', 'like_count']),
+      commentCount: optionalNumberValue(post, ['commentCount', 'comment_count']),
+      shareCount: optionalNumberValue(post, ['shareCount', 'share_count']),
+      statsUpdatedAt: optionalStringValue(post, ['statsUpdatedAt', 'stats_updated_at']),
       files: (Array.isArray(post.files) ? post.files : []).filter(isRecord).map((file) => ({
         relativePath: stringValue(file, ['relativePath', 'relative_path'], ''),
         absolutePath: stringValue(file, ['absolutePath', 'absolute_path'], ''),
@@ -2562,6 +2572,37 @@ export async function loadSourceMediaGallery(sourceId: string): Promise<SourceMe
     buildInvokeArgs({ sourceId }, { source_id: sourceId }),
   )
   return parseSourceMediaGallery(raw, sourceId)
+}
+
+export interface MediaThumbnailBatch {
+  /** false = ffmpeg indisponível; o chamador cai no thumb por <video>. */
+  available: boolean
+  /** caminho absoluto do vídeo → caminho absoluto do jpg em cache. */
+  thumbs: Record<string, string>
+}
+
+export async function loadMediaThumbnails(paths: string[]): Promise<MediaThumbnailBatch> {
+  const raw = await invoke<unknown>('load_media_thumbnails', buildInvokeArgs({ paths }))
+  const value = isRecord(raw) ? raw : {}
+  const thumbs: Record<string, string> = {}
+  const rawThumbs = isRecord(value.thumbs) ? value.thumbs : {}
+  for (const [key, thumb] of Object.entries(rawThumbs)) {
+    if (typeof thumb === 'string' && thumb) thumbs[key] = thumb
+  }
+  return { available: value.available !== false, thumbs }
+}
+
+export async function enqueueMediaThumbnailGeneration(
+  sourceIds: string[],
+): Promise<MediaThumbnailQueueStatus> {
+  return invoke<MediaThumbnailQueueStatus>(
+    'enqueue_media_thumbnail_generation',
+    buildInvokeArgs({ sourceIds }, { source_ids: sourceIds }),
+  )
+}
+
+export async function loadMediaThumbnailQueueStatus(): Promise<MediaThumbnailQueueStatus> {
+  return invoke<MediaThumbnailQueueStatus>('media_thumbnail_queue_status')
 }
 
 export async function openSingleVideosWindow(): Promise<void> {

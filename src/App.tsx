@@ -716,6 +716,13 @@ function App() {
           disabled: contextMenuHasDeletingSelection,
           onSelect: () => void handleCheckSourceAvailability(contextMenuSource.id),
         },
+        ...(contextMenuSource.provider === 'tiktok'
+          ? [{
+              label: 'Refresh media stats',
+              disabled: !singleContextSelection || contextMenuHasDeletingSelection,
+              onSelect: () => void handleRefreshTikTokMediaStats(contextMenuSource.id),
+            }]
+          : []),
         {
           label: contextMenuSource.readyForDownload ? 'Pause automatic download' : 'Mark ready for download',
           disabled: !singleContextSelection || contextMenuHasDeletingSelection,
@@ -1032,6 +1039,28 @@ function App() {
     }
 
     return summary
+  }
+
+  async function handleRefreshTikTokMediaStats(sourceId: string) {
+    if (deletingSourceIds.has(sourceId)) {
+      return
+    }
+
+    setOpenMenu(null)
+    setProfileContextMenu(undefined)
+    try {
+      // Sync one-shot: o run_mode liga a re-coleta de stats só nesta execução,
+      // sem tocar nas opções persistidas do perfil.
+      await runSourceSync(sourceId, {
+        trigger: 'manual_stats_refresh',
+        runMode: 'refresh_media_stats',
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+        window.alert(`Failed to queue the media stats refresh.\n${message}`)
+      }
+    }
   }
 
   async function handleRunSelectedSync(sourceId?: string) {
@@ -1513,7 +1542,7 @@ function App() {
               setMediaPathChange(undefined)
             }
           }}
-          subtitle="A mídia já baixada será movida para o novo local."
+          subtitle="Already downloaded media will be moved to the new location."
           title={mediaPathChange.sourceIds.length > 1
             ? `Change save path (${mediaPathChange.sourceIds.length})`
             : 'Change save path'}

@@ -1,4 +1,5 @@
 import type { ProviderKey } from '../../domain/models'
+import { HelpTip } from '../shared/HelpTip'
 import {
   type ProviderAccountSettingsCategoryKey,
   getProviderAccountSettingsFields,
@@ -77,16 +78,7 @@ export function ProviderAccountSettingsPanel({
                 const labelContent = (
                   <>
                     <span>{field.label}</span>
-                    {field.tooltip ? (
-                      <button
-                        aria-label={`${field.label} help`}
-                        className="accounts-help-tooltip"
-                        title={field.tooltip}
-                        type="button"
-                      >
-                        i
-                      </button>
-                    ) : null}
+                    <HelpTip label={field.label} tooltip={field.tooltip} />
                   </>
                 )
 

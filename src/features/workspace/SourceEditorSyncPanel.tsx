@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { loadSystemShortDatePattern } from '../../bridge/desktop'
+import { HelpTip } from '../shared/HelpTip'
 import {
   resolveInstagramSourceSyncOptions,
   resolveTikTokSourceSyncOptions,
@@ -211,6 +212,7 @@ export function SourceEditorSyncPanel({
               />
             ))}
           </SyncGroupCard>
+
         </div>
 
         <div className="source-editor-sync-column">
@@ -253,12 +255,7 @@ export function SourceEditorSyncPanel({
             checked={Boolean(instagramSyncOptions.textSpecialFolder)}
             label="Text special folder"
             onChange={(checked) => updateInstagramOption(onInstagramSyncOptionsChange, 'textSpecialFolder', checked)}
-          />
-          <FieldRow
-            disabled={!instagramSyncOptions.textSpecialFolder}
-            label="Special path"
-            onChange={(value) => updateInstagramOption(onInstagramSyncOptionsChange, 'specialPath', value)}
-            value={instagramSyncOptions.specialPath ?? ''}
+            tooltip='Save downloaded post text into a "Text" subfolder instead of next to the media.'
           />
           <FieldRow
             label="Username override"
@@ -276,6 +273,15 @@ export function SourceEditorSyncPanel({
             label="Script"
             onChange={(value) => updateInstagramOption(onInstagramSyncOptionsChange, 'script', value)}
             value={instagramSyncOptions.script ?? ''}
+          />
+        </SyncGroupCard>
+
+        <SyncGroupCard className="source-editor-sync-group-storage" title="Storage">
+          <FieldRow
+            label="Special path"
+            onChange={(value) => updateInstagramOption(onInstagramSyncOptionsChange, 'specialPath', value)}
+            tooltip="Media folder for this profile (set automatically by legacy imports). Absolute paths are used as-is; relative values resolve under the account media root. Leave empty to use the default folder."
+            value={instagramSyncOptions.specialPath ?? ''}
           />
         </SyncGroupCard>
       </div>
@@ -510,6 +516,15 @@ function TikTokSyncPanel({ tiktokSyncOptions, localDateFormat, onTikTokSyncOptio
             />
           </SyncGroupCard>
 
+          <SyncGroupCard className="source-editor-sync-group-stats" title="Stats">
+            <ToggleRow
+              checked={tiktokSyncOptions.collectMediaStats !== false}
+              label="Collect media stats"
+              onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'collectMediaStats', checked)}
+              tooltip="Store views, likes, comments, and shares reported by TikTok for newly downloaded media. To re-collect stats for media you already have, use 'Refresh media stats' in the profile's context menu or in the Profile View toolbar."
+            />
+          </SyncGroupCard>
+
           <SyncGroupCard className="source-editor-sync-group-naming" title="Video naming">
             <ToggleRow
               checked={Boolean(tiktokSyncOptions.tokkitFileNaming)}
@@ -617,7 +632,7 @@ function ToggleRow({ label, tooltip, checked, disabled = false, onChange }: Togg
     <div className={disabled ? 'source-editor-setting-row source-editor-setting-row-disabled' : 'source-editor-setting-row'}>
       <div className="source-editor-setting-copy">
         <label htmlFor={inputId}>{label}</label>
-        {helpButton(tooltip)}
+        <HelpTip label={label} tooltip={tooltip} />
       </div>
       <input
         aria-label={label}
@@ -652,7 +667,7 @@ function FieldRow({
     <div className={disabled ? 'source-editor-setting-row source-editor-setting-row-disabled' : 'source-editor-setting-row'}>
       <div className="source-editor-setting-copy">
         <label htmlFor={inputId}>{label}</label>
-        {helpButton(tooltip)}
+        <HelpTip label={label} tooltip={tooltip} />
       </div>
       <input aria-label={label} disabled={disabled} id={inputId} onChange={(event) => onChange(event.target.value)} type="text" value={value} />
     </div>
@@ -717,7 +732,7 @@ function NumberFieldRow({ label, tooltip, value, disabled = false, min, onChange
     <div className={disabled ? 'source-editor-setting-row source-editor-setting-row-disabled' : 'source-editor-setting-row'}>
       <div className="source-editor-setting-copy">
         <label htmlFor={inputId}>{label}</label>
-        {helpButton(tooltip)}
+        <HelpTip label={label} tooltip={tooltip} />
       </div>
       <input
         aria-label={label}
@@ -806,7 +821,7 @@ function LocalizedDateFieldRow({
     <div className={disabled ? 'source-editor-setting-row source-editor-setting-row-disabled source-editor-setting-row-field' : 'source-editor-setting-row source-editor-setting-row-field'}>
       <div className="source-editor-setting-copy">
         <label htmlFor={inputId}>{label}</label>
-        {helpButton(tooltip)}
+        <HelpTip label={label} tooltip={tooltip} />
       </div>
       <div className="source-editor-setting-input plans-date-picker-field" ref={fieldRef}>
         <div className="plans-date-picker-control">
@@ -866,26 +881,6 @@ function LocalizedDateFieldRow({
   )
 }
 
-function helpButton(tooltip?: string) {
-  if (!tooltip) {
-    return null
-  }
-
-  return (
-    <span className="accounts-help-tooltip-shell">
-      <button
-        aria-label={`More information: ${tooltip}`}
-        className="accounts-help-tooltip"
-        type="button"
-      >
-        i
-      </button>
-      <span className="accounts-help-tooltip-content" role="tooltip">
-        {tooltip}
-      </span>
-    </span>
-  )
-}
 
 function detectLocalDateFormat(): LocalDateFormat {
   return localDateFormatFromPattern(Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase().startsWith('pt')

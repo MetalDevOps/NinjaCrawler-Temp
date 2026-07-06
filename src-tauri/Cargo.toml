@@ -6,9 +6,13 @@ authors = ["MetalDevOps"]
 edition = "2021"
 default-run = "ninjacrawler"
 
+# Desktop-only: staticlib/cdylib são exigidos apenas pelos alvos móveis do
+# Tauri e, no Windows, faziam o binário de cargo test linkar contra a cdylib
+# (ninjacrawler_lib.dll) sem os símbolos internos — todo teste morria no loader
+# com STATUS_ENTRYPOINT_NOT_FOUND antes de main.
 [lib]
 name = "ninjacrawler_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }

@@ -205,10 +205,7 @@ fn log_connector_runtime_event(
     let _ = runtime_log::append_workspace(
         "connector.runtime",
         level,
-        None,
-        None,
-        None,
-        None,
+        runtime_log::RuntimeLogAnchor::default(),
         message,
         detail.or_else(|| Some(format!("Connector: {} ({})", entry.display_name, entry.key))),
     );

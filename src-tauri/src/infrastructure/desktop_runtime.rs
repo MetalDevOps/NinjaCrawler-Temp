@@ -220,7 +220,7 @@ pub fn system_short_date_pattern() -> Result<String, String> {
         if normalized.is_empty() {
             return Err("Windows regional short date pattern is empty.".to_string());
         }
-        return Ok(normalized.to_string());
+        Ok(normalized.to_string())
     }
 
     #[cfg(not(windows))]
@@ -1594,7 +1594,7 @@ fn create_tray(
                     ..
                 }
             ) {
-                let _ = activate_main_window_with_route(&tray.app_handle(), None, "tray");
+                let _ = activate_main_window_with_route(tray.app_handle(), None, "tray");
             }
         });
 

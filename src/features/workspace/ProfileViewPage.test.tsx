@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SourceMediaGallery } from '../../domain/models'
 import { ProfileViewPage } from './ProfileViewPage'
 
 const bridgeMocks = vi.hoisted(() => ({
   loadSourceMediaGallery: vi.fn(),
+  loadMediaThumbnails: vi.fn(),
   deleteSourceMedia: vi.fn(),
   loadWorkspaceSnapshot: vi.fn(),
   openExternalTarget: vi.fn(),
@@ -18,6 +19,28 @@ const bridgeMocks = vi.hoisted(() => ({
 
 vi.mock('../../bridge/desktop', () => bridgeMocks)
 vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: (path: string) => `asset://${path}` }))
+
+// jsdom não faz layout, então a virtualização real (que depende de medir a
+// viewport/linhas) renderizaria zero linhas. Trocamos o virtualizer por um que
+// renderiza todas as linhas — os testes checam ordem/contagem, não o windowing.
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({ count }: { count: number }) => ({
+    getTotalSize: () => count * 200,
+    getVirtualItems: () =>
+      Array.from({ length: count }, (_, index) => ({ index, key: index, start: index * 200 })),
+    measureElement: () => undefined,
+    measure: () => undefined,
+    isScrolling: false,
+  }),
+}))
+
+// O componente usa ResizeObserver p/ medir a largura; jsdom não o tem.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+vi.stubGlobal('ResizeObserver', ResizeObserverStub)
 
 function galleryFixture(): SourceMediaGallery {
   // 2026-05-19 ~ capturedAt
@@ -32,6 +55,7 @@ function galleryFixture(): SourceMediaGallery {
         postId: '7624199329925958920',
         postUrl: 'https://www.tiktok.com/@gaaby.tls/video/7624199329925958920',
         capturedAt: day,
+        viewCount: 10,
         mediaType: 'video',
         section: 'timeline',
         files: [
@@ -42,6 +66,7 @@ function galleryFixture(): SourceMediaGallery {
         postId: '7600000000000000000',
         postUrl: 'https://www.tiktok.com/@gaaby.tls/video/7600000000000000000',
         capturedAt: day - 60,
+        viewCount: 100,
         mediaType: 'slideshow',
         section: 'timeline',
         files: [
@@ -81,6 +106,38 @@ function instagramGalleryFixture(): SourceMediaGallery {
   }
 }
 
+// TikTok com Timeline + Likes: datas de criação e download distintas e autores
+// nos likes, para exercitar filtro de seção, ordenação e busca por autor.
+function tiktokMixedFixture(): SourceMediaGallery {
+  const day = Math.floor(Date.parse('2026-05-19T12:00:00Z') / 1000)
+  const img = (name: string) => [
+    { relativePath: `${name}.jpg`, absolutePath: `S:/${name}.jpg`, mediaType: 'image' },
+  ]
+  return {
+    sourceId: 'tk-1',
+    provider: 'tiktok',
+    handle: 'creator',
+    profileUrl: 'https://www.tiktok.com/@creator',
+    posts: [
+      { postId: 't1', capturedAt: day, downloadedAt: day + 100, mediaType: 'image', section: 'timeline', files: img('t1') },
+      { postId: 't2', capturedAt: day - 1000, downloadedAt: day + 200, mediaType: 'image', section: 'timeline', files: img('t2') },
+      { postId: 'l1', capturedAt: day - 500, downloadedAt: day + 50, author: 'alice', mediaType: 'image', section: 'likes', files: img('l1') },
+      { postId: 'l2', capturedAt: day - 200, downloadedAt: day + 300, author: 'bob', mediaType: 'image', section: 'likes', files: img('l2') },
+    ],
+  } as SourceMediaGallery
+}
+
+/** Ordem (por id abreviado) das miniaturas montadas, na sequência do DOM. */
+function thumbOrder(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll('.profile-view-thumb img')).map(
+    (img) =>
+      (img as HTMLImageElement)
+        .getAttribute('src')
+        ?.replace('asset://S:/', '')
+        .replace('.jpg', '') ?? '',
+  )
+}
+
 describe('ProfileViewPage', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -88,6 +145,9 @@ describe('ProfileViewPage', () => {
       mock.mockReset()
     }
     bridgeMocks.loadSourceMediaGallery.mockResolvedValue(galleryFixture())
+    // ffmpeg "disponível" mas sem thumbs prontos → cards de vídeo viram
+    // placeholder (sem <video> no grid), o comportamento padrão do app.
+    bridgeMocks.loadMediaThumbnails.mockResolvedValue({ available: true, thumbs: {} })
     bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue({ sources: [] })
     bridgeMocks.subscribeToProfileViewSource.mockResolvedValue(() => undefined)
     bridgeMocks.subscribeToSourceSyncQueue.mockResolvedValue(() => undefined)
@@ -115,6 +175,23 @@ describe('ProfileViewPage', () => {
         'https://www.tiktok.com/@gaaby.tls/video/7624199329925958920',
       )
     })
+  })
+
+  it('sorts media by TikTok view count when Popularity is selected', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    await screen.findAllByRole('button', { name: 'Online' })
+
+    // Abre o menu de ordenação e escolhe o eixo de popularidade (views).
+    fireEvent.click(screen.getByRole('button', { name: 'Sort order' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Popularity' }))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Online' })[0])
+
+    await waitFor(() => {
+      expect(bridgeMocks.openExternalTarget).toHaveBeenCalledWith(
+        'https://www.tiktok.com/@gaaby.tls/video/7600000000000000000',
+      )
+    })
+    expect(localStorage.getItem('profileView.sortField')).toBe('popularity')
   })
 
   it('switches to the "all media" grid and persists the choice', async () => {
@@ -174,59 +251,6 @@ describe('ProfileViewPage', () => {
       expect(bridgeMocks.openExternalTarget).toHaveBeenCalledWith('https://www.instagram.com/p/CyAbC-1_x/')
     })
   })
-
-  it('renders media progressively and grows the window on scroll', async () => {
-    // Capture IntersectionObserver instances (jsdom has none) so we can fire it.
-    const observers: Array<(entries: Array<{ isIntersecting: boolean }>) => void> = []
-    class MockIntersectionObserver {
-      constructor(cb: (entries: Array<{ isIntersecting: boolean }>) => void) {
-        observers.push(cb)
-      }
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    }
-    vi.stubGlobal('IntersectionObserver', MockIntersectionObserver)
-
-    const day = Math.floor(Date.parse('2026-05-19T12:00:00Z') / 1000)
-    // Image posts keep the DOM light (an <img> per card vs a heavier <video>).
-    const posts = Array.from({ length: 140 }, (_, index) => ({
-      postId: `p-${index}`,
-      postUrl: `https://www.tiktok.com/@bulk/photo/${index}`,
-      capturedAt: day - index,
-      mediaType: 'image' as const,
-      section: 'timeline',
-      files: [{ relativePath: `${index}.jpg`, absolutePath: `S:/x/${index}.jpg`, mediaType: 'image' }],
-    }))
-    bridgeMocks.loadSourceMediaGallery.mockResolvedValue({
-      sourceId: 'bulk',
-      provider: 'tiktok',
-      handle: 'bulk',
-      profileUrl: 'https://www.tiktok.com/@bulk',
-      posts,
-    } satisfies SourceMediaGallery)
-
-    render(<ProfileViewPage initialSourceId="bulk" />)
-
-    // First window only mounts the initial batch, not all 150 posts.
-    await waitFor(
-      () => expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(120),
-      { timeout: 5000 },
-    )
-
-    // The sentinel's IntersectionObserver is wired up in an effect that can run a
-    // tick after the initial batch mounts, so wait for it instead of asserting
-    // synchronously (otherwise `observers` is intermittently still empty here).
-    await waitFor(() => expect(observers.length).toBeGreaterThan(0))
-    // The sentinel becoming visible grows the window to cover the rest.
-    act(() => observers[observers.length - 1]([{ isIntersecting: true }]))
-    await waitFor(
-      () => expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(140),
-      { timeout: 5000 },
-    )
-
-    vi.unstubAllGlobals()
-  }, 20000)
 
   it('opens the lightbox when a thumbnail is clicked', async () => {
     render(<ProfileViewPage initialSourceId="src-1" />)
@@ -404,5 +428,158 @@ describe('ProfileViewPage', () => {
     // Switching to "By day" leaves album mode (album headers gone).
     fireEvent.click(screen.getByRole('button', { name: /by day/i }))
     expect(screen.queryByText('Venda')).toBeNull()
+  })
+
+  it('labels the TikTok timeline chip "Timeline" and filters Likes', async () => {
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(tiktokMixedFixture())
+    render(<ProfileViewPage initialSourceId="tk-1" />)
+
+    // Section chips read Timeline (not "Posts") + Likes.
+    expect(await screen.findByRole('button', { name: /^Timeline$/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /^Posts$/ })).toBeNull()
+    const likesChip = screen.getByRole('button', { name: /^Likes$/ })
+
+    // "All" shows the four posts; filtering to Likes keeps only the two likes.
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(4)
+    fireEvent.click(likesChip)
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(2)
+  })
+
+  it('searches Likes by author via the inline field', async () => {
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(tiktokMixedFixture())
+    render(<ProfileViewPage initialSourceId="tk-1" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Likes$/ }))
+    // The magnifier only exists on the Likes tab; expand it and search.
+    fireEvent.click(screen.getByRole('button', { name: /search likes by author/i }))
+    fireEvent.change(screen.getByRole('searchbox', { name: /search likes by author/i }), {
+      target: { value: 'bob' },
+    })
+    // Only bob's like survives; alice's is filtered out.
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
+
+    // The search field is absent outside the Likes tab.
+    fireEvent.click(screen.getByRole('button', { name: /^Timeline$/ }))
+    expect(screen.queryByRole('button', { name: /search likes by author/i })).toBeNull()
+  })
+
+  it('matches authors typed with @ and falls back to the file name', async () => {
+    const fixture = tiktokMixedFixture()
+    // Like without a backend author — search must fall back to the file name.
+    fixture.posts.push({
+      postId: 'l3',
+      capturedAt: Math.floor(Date.parse('2026-05-19T12:00:00Z') / 1000) - 300,
+      mediaType: 'image',
+      section: 'likes',
+      files: [
+        { relativePath: 'Liked/carol_777.jpg', absolutePath: 'S:/carol_777.jpg', mediaType: 'image' },
+      ],
+    } as SourceMediaGallery['posts'][number])
+    const alicePost = fixture.posts.find((post) => post.author === 'alice')
+    if (!alicePost) throw new Error('fixture must contain alice')
+    alicePost.files[0].relativePath =
+      'Liked/.alice_1779997681_7645031804658814215.mp4'
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(fixture)
+    render(<ProfileViewPage initialSourceId="tk-1" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Likes$/ }))
+    fireEvent.click(screen.getByRole('button', { name: /search likes by author/i }))
+    const input = screen.getByRole('searchbox', { name: /search likes by author/i })
+
+    // Leading @ is ignored (users paste @handles).
+    fireEvent.change(input, { target: { value: '@alice' } })
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
+
+    // No author on the post → the file name (which carries the uploader) matches.
+    fireEvent.change(input, { target: { value: 'carol' } })
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
+
+    // Mesmo quando há author no ledger, colar o basename completo precisa achar
+    // a mídia (incluindo nomes válidos que começam com ponto).
+    fireEvent.change(input, {
+      target: { value: '.alice_1779997681_7645031804658814215.mp4' },
+    })
+    expect(screen.getAllByRole('button', { name: /open preview/i }).length).toBe(1)
+  })
+
+  it('groups Likes by user with per-author headers, most liked first', async () => {
+    const fixture = tiktokMixedFixture()
+    // Second like from alice so her group outranks bob's.
+    fixture.posts.push({
+      postId: 'l4',
+      capturedAt: Math.floor(Date.parse('2026-05-19T12:00:00Z') / 1000) - 400,
+      author: 'alice',
+      mediaType: 'image',
+      section: 'likes',
+      files: [{ relativePath: 'l4.jpg', absolutePath: 'S:/l4.jpg', mediaType: 'image' }],
+    } as SourceMediaGallery['posts'][number])
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(fixture)
+    render(<ProfileViewPage initialSourceId="tk-1" />)
+
+    // The Likes tab defaults to grouping by user.
+    fireEvent.click(await screen.findByRole('button', { name: /^Likes$/ }))
+    expect(screen.getByRole('button', { name: /by user/i })).toHaveProperty('ariaPressed', 'true')
+    const alice = screen.getByText('@alice')
+    const bob = screen.getByText('@bob')
+    // Alice (2 likes) ranks above bob (1) in the DOM.
+    expect(alice.compareDocumentPosition(bob) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    // Switching to All media drops the author headers.
+    fireEvent.click(screen.getByRole('button', { name: /all media/i }))
+    expect(screen.queryByText('@alice')).toBeNull()
+  })
+
+  it('deletes the active post with Shift+Del in the lightbox, without a dialog', async () => {
+    const remaining = galleryFixture()
+    remaining.posts = remaining.posts.slice(1)
+    bridgeMocks.deleteSourceMedia.mockResolvedValue(remaining)
+    render(<ProfileViewPage initialSourceId="src-1" />)
+
+    const thumbs = await screen.findAllByRole('button', { name: /open preview/i })
+    fireEvent.click(thumbs[0])
+    await screen.findByRole('dialog')
+
+    fireEvent.keyDown(document, { key: 'Delete', shiftKey: true })
+    await waitFor(() =>
+      expect(bridgeMocks.deleteSourceMedia).toHaveBeenCalledWith('src-1', ['a.mp4']),
+    )
+    // No confirmation dialog: Shift is the confirmation.
+    expect(screen.queryByText(/Delete media\?/i)).toBeNull()
+    // The lightbox stays open showing the next item (the slideshow post).
+    await waitFor(() => {
+      const dialog = screen.getByRole('dialog')
+      expect(within(dialog).getByRole('button', { name: /open online/i })).toBeTruthy()
+    })
+  })
+
+  it('shows the author above the media in the lightbox', async () => {
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(tiktokMixedFixture())
+    render(<ProfileViewPage initialSourceId="tk-1" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /^Likes$/ }))
+    fireEvent.click(screen.getAllByRole('button', { name: /open preview/i })[0])
+    const dialog = await screen.findByRole('dialog')
+    // Newest like first → bob's; his @handle heads the lightbox.
+    expect(within(dialog).getByText('@bob')).toBeTruthy()
+  })
+
+  it('sorts by creation and download date in both directions', async () => {
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(tiktokMixedFixture())
+    const { container } = render(<ProfileViewPage initialSourceId="tk-1" />)
+    await screen.findByRole('button', { name: /^Timeline$/ })
+
+    // Grid mode drops the day headers, so the thumbnail order is the sort order.
+    fireEvent.click(screen.getByRole('button', { name: /all media/i }))
+    // Default: creation date, newest first.
+    expect(thumbOrder(container)).toEqual(['t1', 'l2', 'l1', 't2'])
+
+    // Switch the axis to download date (menu stays open for both toggles).
+    fireEvent.click(screen.getByRole('button', { name: /sort order/i }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /download date/i }))
+    expect(thumbOrder(container)).toEqual(['l2', 't2', 't1', 'l1'])
+
+    // Flip the direction to oldest first.
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /oldest first/i }))
+    expect(thumbOrder(container)).toEqual(['l1', 't1', 't2', 'l2'])
   })
 })

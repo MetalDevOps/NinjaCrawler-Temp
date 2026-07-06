@@ -19,7 +19,6 @@ export type SchedulerPauseMode =
   | '12h'
   | 'until'
 export type SchedulerSkipMode = 'default' | 'minutes' | 'until' | 'reset'
-export type SchedulerDateMode = 'updated' | 'downloaded'
 export type ConnectorRuntimeManagementMode = 'managed' | 'custom'
 export type InstagramPresetSlot = 'preset1' | 'preset2'
 export type ConnectorRuntimeStatusKind =
@@ -148,6 +147,8 @@ export interface TikTokSourceSyncOptions {
   likedVideosLimit?: number
   likedVideosIncremental?: boolean
   likedVideosKnownPageThreshold?: number
+  collectMediaStats?: boolean
+  refreshExistingMediaStats?: boolean
   downloadVideos?: boolean
   downloadPhotos?: boolean
   useNativeTitle?: boolean
@@ -175,7 +176,7 @@ export interface SourceSyncOptions {
 
 export interface RunSourceSyncOptions {
   trigger?: string
-  runMode?: 'force_imported_backfill'
+  runMode?: 'force_imported_backfill' | 'refresh_media_stats'
   syncOptionsOverride?: SourceSyncOptions
 }
 
@@ -533,6 +534,10 @@ export interface MediaGalleryPost {
   postId?: string
   postUrl?: string
   capturedAt?: number
+  /** When the media was first downloaded/seen by the app (unix seconds). */
+  downloadedAt?: number
+  /** Original author — only set for TikTok Likes (used for author search). */
+  author?: string
   mediaType: 'video' | 'image' | 'slideshow'
   section: string
   /**
@@ -541,15 +546,60 @@ export interface MediaGalleryPost {
    */
   albums?: string[]
   posterPath?: string
+  viewCount?: number
+  likeCount?: number
+  commentCount?: number
+  shareCount?: number
+  statsUpdatedAt?: string
   files: MediaGalleryFile[]
 }
 
 export interface SourceMediaGallery {
+    sourceId: string
+    provider: ProviderKey
+    handle: string
+    profileUrl: string
+    posts: MediaGalleryPost[]
+}
+
+export interface MediaThumbnailQueueItem {
   sourceId: string
   provider: ProviderKey
   handle: string
-  profileUrl: string
-  posts: MediaGalleryPost[]
+  state: 'queued' | 'running'
+  queuedAt: string
+  startedAt?: string
+  filesScanned: number
+  filesTotal: number
+  filesProcessed: number
+  generated: number
+  skippedExisting: number
+  failed: number
+  currentFile?: string
+  progressPercent?: number
+}
+
+export interface MediaThumbnailQueueResult {
+  sourceId: string
+  provider: ProviderKey
+  handle: string
+  status: 'succeeded' | 'failed'
+  summary: string
+  generated: number
+  skippedExisting: number
+  failed: number
+  finishedAt: string
+}
+
+export interface MediaThumbnailQueueStatus {
+  queuedCount: number
+  runningCount: number
+  completedCount: number
+  failedCount: number
+  active?: MediaThumbnailQueueItem
+  queuedItems: MediaThumbnailQueueItem[]
+  recentResults: MediaThumbnailQueueResult[]
+  updatedAt: string
 }
 
 export interface SingleVideo {
@@ -945,14 +995,12 @@ export interface SchedulerPlanCriteria {
   sitesExcluded: ProviderKey[]
   groupIdsIncluded: string[]
   groupIdsExcluded: string[]
-  groupsOnly: boolean
   usersCount?: number
   daysNumber?: number
   daysIsDownloaded: boolean
   dateFrom?: string
   dateTo?: string
   dateInRange: boolean
-  dateMode?: SchedulerDateMode
   advancedExpression?: string
 }
 

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Manifest dos BINÁRIOS DE TESTE (cargo test). O manifest do app é embutido
+     pelo tauri-build apenas nos bins; sem este aqui o loader resolve comctl32
+     para a 5.82 clássica e TaskDialogIndirect (rfd/muda, só na v6) não existe,
+     derrubando todo teste com STATUS_ENTRYPOINT_NOT_FOUND antes de main. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>

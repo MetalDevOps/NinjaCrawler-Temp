@@ -90,6 +90,8 @@ pub struct TikTokConnectorRequest {
     pub abort_on_limit: bool,
     /// Segundos entre lotes; `-1` desabilita (default SCrawler).
     pub sleep_timer_secs: i64,
+    pub collect_media_stats: bool,
+    pub refresh_existing_media_stats: bool,
     pub ledger_post_keys: HashSet<String>,
     pub ledger_media_keys: HashSet<String>,
     pub existing_relative_paths: HashSet<String>,
@@ -102,6 +104,10 @@ pub struct TikTokConnectorRequest {
 pub struct ObservedTikTokPost {
     pub provider_post_key: String,
     pub media_section: String,
+    pub view_count: Option<i64>,
+    pub like_count: Option<i64>,
+    pub comment_count: Option<i64>,
+    pub share_count: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -158,6 +164,10 @@ pub struct TikTokProgress {
 struct EnumeratedPost {
     post_id: String,
     webpage_url: String,
+    view_count: Option<i64>,
+    like_count: Option<i64>,
+    comment_count: Option<i64>,
+    share_count: Option<i64>,
 }
 
 pub fn run_profile_sync<F, C, D>(
@@ -204,6 +214,10 @@ where
             observed_posts.push(ObservedTikTokPost {
                 provider_post_key: media.provider_post_key.clone(),
                 media_section: media.media_section.clone(),
+                view_count: None,
+                like_count: None,
+                comment_count: None,
+                share_count: None,
             });
             downloaded_media.push(media);
         }
@@ -240,7 +254,24 @@ where
             progress_percent: Some(0),
             indeterminate: true,
         });
-        let listed = enumerate_posts(request, &profile_url, &is_cancelled)?;
+        // Cada linha do yt-dlp é um post enumerado; reporta a contagem ao vivo
+        // para o parse de perfis grandes não parecer travado.
+        let mut listed_count: u32 = 0;
+        let listed = enumerate_posts(request, &profile_url, &is_cancelled, &mut |line| {
+            if line.trim().is_empty() {
+                return;
+            }
+            listed_count += 1;
+            if listed_count.is_multiple_of(10) {
+                report_progress(TikTokProgress {
+                    label: "Parsing profile".to_string(),
+                    detail: format!("Listed {listed_count} post(s) so far for '{handle}'."),
+                    downloaded_items: Some(0),
+                    progress_percent: None,
+                    indeterminate: true,
+                });
+            }
+        })?;
         connector_debug::append_current(
             "internal.tiktok",
             "system",
@@ -336,12 +367,46 @@ where
             }
             if request.ledger_post_keys.contains(&post.post_id) {
                 summary.skipped_existing_post_count += 1;
+                if request.collect_media_stats && request.refresh_existing_media_stats {
+                    observed_posts.push(observed_from_enumerated_post(&post));
+                }
                 continue;
             }
             summary.discovered_asset_count += 1;
             selected.push(post);
         }
         summary.queued_asset_count = selected.len() as u32;
+        if request.collect_media_stats && request.refresh_existing_media_stats {
+            let refreshed = observed_posts
+                .iter()
+                .filter(|post| {
+                    post.view_count.is_some()
+                        || post.like_count.is_some()
+                        || post.comment_count.is_some()
+                        || post.share_count.is_some()
+                })
+                .count();
+            report_progress(TikTokProgress {
+                label: "Refreshing media stats".to_string(),
+                detail: format!(
+                    "Collected fresh stats for {refreshed} existing post(s) out of {} scanned.",
+                    summary.normalized_post_count
+                ),
+                downloaded_items: Some(summary.downloaded_asset_count),
+                progress_percent: Some(50),
+                indeterminate: false,
+            });
+            connector_debug::append_current(
+                "internal.tiktok",
+                "system",
+                "stats.refresh.complete",
+                format!(
+                    "posts_scanned={}\nstats_refreshed={refreshed}\nstats_missing={}",
+                    summary.normalized_post_count,
+                    summary.normalized_post_count.saturating_sub(refreshed as u32)
+                ),
+            );
+        }
         connector_debug::append_current(
             "internal.tiktok",
             "system",
@@ -361,18 +426,24 @@ where
             if is_cancelled() {
                 return Err("source sync cancelled by user".to_string());
             }
+            let batch_base = processed;
             processed += batch.len();
             let done = processed.min(total);
-            let percent = if total > 0 {
-                ((done as f64 / total as f64) * 100.0).round() as u32
-            } else {
-                0
+            let percent_for = |completed: usize| -> u32 {
+                if total > 0 {
+                    (((completed.min(total)) as f64 / total as f64) * 100.0).round() as u32
+                } else {
+                    0
+                }
             };
             report_progress(TikTokProgress {
                 label: "Downloading posts".to_string(),
-                detail: format!("Post {done} of {total}"),
+                detail: format!(
+                    "Post {} of {total}",
+                    (batch_base + 1).min(total.max(1))
+                ),
                 downloaded_items: Some(summary.downloaded_asset_count),
-                progress_percent: Some(percent.min(100)),
+                progress_percent: Some(percent_for(batch_base).min(100)),
                 indeterminate: false,
             });
 
@@ -392,7 +463,27 @@ where
                         .join(",")
                 ),
             );
-            match download_batch(request, batch, &is_cancelled) {
+            // Cada linha `after_move` do yt-dlp é um post concluído: reporta o
+            // avanço real dentro do lote em vez de saltar por batch inteiro.
+            let downloaded_before_batch = summary.downloaded_asset_count;
+            let mut batch_completed = 0_usize;
+            let batch_result = download_batch(request, batch, &is_cancelled, &mut |line| {
+                if line.trim().is_empty() {
+                    return;
+                }
+                batch_completed = (batch_completed + 1).min(batch.len());
+                let done_overall = batch_base + batch_completed;
+                report_progress(TikTokProgress {
+                    label: "Downloading posts".to_string(),
+                    detail: format!("Post {done_overall} of {total}"),
+                    downloaded_items: Some(
+                        downloaded_before_batch + batch_completed as u32,
+                    ),
+                    progress_percent: Some(percent_for(done_overall).min(100)),
+                    indeterminate: false,
+                });
+            });
+            match batch_result {
                 Ok(outcome) => {
                     connector_debug::append_current(
                         "internal.tiktok",
@@ -423,6 +514,18 @@ where
                         summary.downloaded_asset_count += 1;
                         downloaded_media.push(media);
                     }
+                    // Consolida o lote com os contadores reais (dedup do ledger
+                    // pode reduzir o total efetivamente novo).
+                    report_progress(TikTokProgress {
+                        label: "Downloading posts".to_string(),
+                        detail: format!(
+                            "Post {done} of {total} — {} new media item(s) so far",
+                            summary.downloaded_asset_count
+                        ),
+                        downloaded_items: Some(summary.downloaded_asset_count),
+                        progress_percent: Some(percent_for(done).min(100)),
+                        indeterminate: false,
+                    });
                     if outcome.rate_limited && request.abort_on_limit {
                         limit_aborted = processed < total;
                         if limit_aborted {
@@ -457,11 +560,17 @@ where
             }
         }
 
-        for post_id in downloaded_post_ids {
-            observed_posts.push(ObservedTikTokPost {
-                provider_post_key: post_id,
-                media_section: "timeline".to_string(),
-            });
+        for post in &selected {
+            if downloaded_post_ids.contains(&post.post_id) {
+                let mut observed = observed_from_enumerated_post(post);
+                if !request.collect_media_stats {
+                    observed.view_count = None;
+                    observed.like_count = None;
+                    observed.comment_count = None;
+                    observed.share_count = None;
+                }
+                observed_posts.push(observed);
+            }
         }
         }
 
@@ -493,6 +602,10 @@ where
                             observed_posts.push(ObservedTikTokPost {
                                 provider_post_key: media.provider_post_key.clone(),
                                 media_section,
+                                view_count: None,
+                                like_count: None,
+                                comment_count: None,
+                                share_count: None,
                             });
                         }
                         summary.downloaded_asset_count += 1;
@@ -718,6 +831,7 @@ fn enumerate_posts<C>(
     request: &TikTokConnectorRequest,
     profile_url: &str,
     is_cancelled: &C,
+    on_listed_line: &mut dyn FnMut(&str),
 ) -> Result<EnumeratedPosts, String>
 where
     C: Fn() -> bool,
@@ -730,7 +844,7 @@ where
         .arg(YT_DLP_IMPERSONATE)
         .arg("--flat-playlist")
         .arg("--print")
-        .arg("%(id)s\t%(webpage_url)s\t%(uploader_id)s")
+        .arg("%(id)s\t%(webpage_url)s\t%(uploader_id)s\t%(view_count)s\t%(like_count)s\t%(comment_count)s\t%(repost_count)s")
         .arg("--no-cookies-from-browser")
         .arg("--cookies")
         .arg(&request.cookie_file);
@@ -743,11 +857,12 @@ where
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let (stdout, stderr) = run_capturing(
+    let (stdout, stderr) = run_capturing_streaming(
         command,
         YT_DLP_LIST_TIMEOUT_SECS,
         is_cancelled,
         "yt-dlp (listing)",
+        on_listed_line,
     )?;
     let rate_limited = output_is_rate_limited(&stderr);
 
@@ -762,6 +877,10 @@ where
         let post_id = parts.next().unwrap_or("").trim();
         let webpage_url = parts.next().unwrap_or("").trim();
         let uploader = parts.next().unwrap_or("").trim();
+        let view_count = parse_optional_count(parts.next());
+        let like_count = parse_optional_count(parts.next());
+        let comment_count = parse_optional_count(parts.next());
+        let share_count = parse_optional_count(parts.next());
         if post_id.is_empty() || post_id == "NA" {
             continue;
         }
@@ -776,6 +895,10 @@ where
         posts.push(EnumeratedPost {
             post_id: post_id.to_string(),
             webpage_url: url,
+            view_count,
+            like_count,
+            comment_count,
+            share_count,
         });
     }
 
@@ -784,6 +907,24 @@ where
         uploader_id,
         rate_limited,
     })
+}
+
+fn parse_optional_count(value: Option<&str>) -> Option<i64> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "NA")
+        .and_then(|value| value.parse::<i64>().ok())
+}
+
+fn observed_from_enumerated_post(post: &EnumeratedPost) -> ObservedTikTokPost {
+    ObservedTikTokPost {
+        provider_post_key: post.post_id.clone(),
+        media_section: "timeline".to_string(),
+        view_count: post.view_count,
+        like_count: post.like_count,
+        comment_count: post.comment_count,
+        share_count: post.share_count,
+    }
 }
 
 struct BatchOutcome {
@@ -890,6 +1031,7 @@ fn download_batch<C>(
     request: &TikTokConnectorRequest,
     batch: &[EnumeratedPost],
     is_cancelled: &C,
+    on_stdout_line: &mut dyn FnMut(&str),
 ) -> Result<BatchOutcome, String>
 where
     C: Fn() -> bool,
@@ -971,11 +1113,12 @@ where
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let (stdout, stderr) = run_capturing(
+    let (stdout, stderr) = run_capturing_streaming(
         command,
         YT_DLP_DOWNLOAD_TIMEOUT_SECS,
         is_cancelled,
         "yt-dlp (download)",
+        on_stdout_line,
     )?;
     let rate_limited = output_is_rate_limited(&stderr);
 
@@ -1502,7 +1645,7 @@ fn apply_user_agent(command: &mut Command, request: &TikTokConnectorRequest) {
 /// As saídas são drenadas em threads concorrentes para evitar deadlock quando o
 /// yt-dlp produz muita saída.
 fn run_capturing<C>(
-    mut command: Command,
+    command: Command,
     timeout_secs: u64,
     is_cancelled: &C,
     label: &str,
@@ -1510,6 +1653,23 @@ fn run_capturing<C>(
 where
     C: Fn() -> bool,
 {
+    run_capturing_streaming(command, timeout_secs, is_cancelled, label, &mut |_| {})
+}
+
+/// Igual ao `run_capturing`, mas entrega cada linha de stdout ao callback
+/// enquanto o processo roda (com a latência do polling de 250ms). É o que
+/// permite progresso em tempo real nas execuções longas do yt-dlp.
+fn run_capturing_streaming<C>(
+    mut command: Command,
+    timeout_secs: u64,
+    is_cancelled: &C,
+    label: &str,
+    on_stdout_line: &mut dyn FnMut(&str),
+) -> Result<(String, String), String>
+where
+    C: Fn() -> bool,
+{
+    let (line_sender, line_receiver) = std::sync::mpsc::channel::<String>();
     let context = connector_debug::current_context();
     let command_line = std::iter::once(command.get_program().to_string_lossy().to_string())
         .chain(command.get_args().map(|arg| arg.to_string_lossy().to_string()))
@@ -1557,6 +1717,7 @@ where
                     "process.output",
                     line.clone(),
                 );
+                let _ = line_sender.send(line.clone());
                 lines.push(line);
             }
         }
@@ -1586,6 +1747,9 @@ where
     let mut cancelled = false;
     let mut timed_out = false;
     loop {
+        while let Ok(line) = line_receiver.try_recv() {
+            on_stdout_line(&line);
+        }
         if is_cancelled() {
             let _ = child.kill();
             let _ = child.wait();
@@ -1643,6 +1807,10 @@ where
 
     let stdout = stdout_reader.join().unwrap_or_default();
     let stderr = stderr_reader.join().unwrap_or_default();
+    // Entrega as linhas emitidas entre o último poll e o fim do processo.
+    while let Ok(line) = line_receiver.try_recv() {
+        on_stdout_line(&line);
+    }
     if cancelled {
         return Err("source sync cancelled by user".to_string());
     }

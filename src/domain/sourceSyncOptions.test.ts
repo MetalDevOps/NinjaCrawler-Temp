@@ -34,6 +34,13 @@ describe('tiktok source sync options', () => {
     expect(options.likedVideosIncremental).toBe(true)
     expect(options.likedVideosKnownPageThreshold).toBe(3)
   })
+
+  it('collects stats for new media without refreshing existing media by default', () => {
+    const options = createTikTokSourceSyncOptions()
+
+    expect(options.collectMediaStats).toBe(true)
+    expect(options.refreshExistingMediaStats).toBe(false)
+  })
 })
 
 describe('twitter source sync options', () => {

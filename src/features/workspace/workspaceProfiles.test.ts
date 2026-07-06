@@ -20,7 +20,7 @@ function emptyCriteria(): SchedulerPlanCriteria {
     userExists: false, userSuspended: false, userDeleted: false,
     labelsNo: false, labelsIncluded: [], labelsExcluded: [], ignoreExcludedLabels: false,
     sitesIncluded: [], sitesExcluded: [],
-    groupIdsIncluded: [], groupIdsExcluded: [], groupsOnly: false,
+    groupIdsIncluded: [], groupIdsExcluded: [],
     daysIsDownloaded: false, dateInRange: true,
   }
 }
