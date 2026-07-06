@@ -19,7 +19,6 @@ export type SchedulerPauseMode =
   | '12h'
   | 'until'
 export type SchedulerSkipMode = 'default' | 'minutes' | 'until' | 'reset'
-export type SchedulerDateMode = 'updated' | 'downloaded'
 export type ConnectorRuntimeManagementMode = 'managed' | 'custom'
 export type InstagramPresetSlot = 'preset1' | 'preset2'
 export type ConnectorRuntimeStatusKind =
@@ -177,7 +176,7 @@ export interface SourceSyncOptions {
 
 export interface RunSourceSyncOptions {
   trigger?: string
-  runMode?: 'force_imported_backfill'
+  runMode?: 'force_imported_backfill' | 'refresh_media_stats'
   syncOptionsOverride?: SourceSyncOptions
 }
 
@@ -996,14 +995,12 @@ export interface SchedulerPlanCriteria {
   sitesExcluded: ProviderKey[]
   groupIdsIncluded: string[]
   groupIdsExcluded: string[]
-  groupsOnly: boolean
   usersCount?: number
   daysNumber?: number
   daysIsDownloaded: boolean
   dateFrom?: string
   dateTo?: string
   dateInRange: boolean
-  dateMode?: SchedulerDateMode
   advancedExpression?: string
 }
 

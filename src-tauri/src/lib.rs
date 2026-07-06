@@ -11,7 +11,7 @@ pub fn run() {
         .plugin(infrastructure::desktop_runtime::window_state_plugin())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            infrastructure::desktop_runtime::setup(&app.handle())
+            infrastructure::desktop_runtime::setup(app.handle())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
             infrastructure::scheduler_runtime::start(app.handle().clone())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;

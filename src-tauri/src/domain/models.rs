@@ -1566,7 +1566,6 @@ pub struct SchedulerPlanCriteria {
     pub group_ids_included: Vec<String>,
     #[serde(default)]
     pub group_ids_excluded: Vec<String>,
-    pub groups_only: bool,
     pub users_count: Option<u32>,
     pub days_number: Option<u32>,
     pub days_is_downloaded: bool,
@@ -1574,7 +1573,6 @@ pub struct SchedulerPlanCriteria {
     pub date_to: Option<String>,
     #[serde(default = "default_date_in_range")]
     pub date_in_range: bool,
-    pub date_mode: Option<String>,
     pub advanced_expression: Option<String>,
 }
 

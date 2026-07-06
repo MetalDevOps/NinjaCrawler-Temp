@@ -84,7 +84,6 @@ describe('BatchEditorWindowPage', () => {
         sitesExcluded: [],
         groupIdsIncluded: [],
         groupIdsExcluded: [],
-        groupsOnly: false,
         daysIsDownloaded: false,
         dateInRange: true,
       },

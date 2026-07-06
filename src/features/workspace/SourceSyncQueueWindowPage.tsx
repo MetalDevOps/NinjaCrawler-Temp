@@ -593,9 +593,10 @@ export function SourceSyncQueueWindowPage() {
         const running = runningTasks
           .filter((task) => task.provider === provider)
           .sort((a, b) => Date.parse(a.startedAt ?? a.queuedAt) - Date.parse(b.startedAt ?? b.queuedAt))
-        let queued = queuedTasks
-          .filter((task) => task.provider === provider)
-          .sort((a, b) => Date.parse(a.queuedAt) - Date.parse(b.queuedAt))
+        // A ordem do payload é autoritativa: o backend emite cada sub-fila na
+        // ordem real de execução (incluindo reordenação manual). Ordenar por
+        // queuedAt aqui desfazia o drag-and-drop a cada evento da fila.
+        let queued = queuedTasks.filter((task) => task.provider === provider)
         const override = queueOrderOverride[provider]
         if (override) {
           const rank = new Map(override.map((id, index) => [id, index]))

@@ -1,0 +1,12 @@
+# Runner que injeta o manifest comctl32 v6 nos executáveis de teste
+# (ver scripts/win-test-runner.ps1). Sem ele, cargo test morre no loader com
+# STATUS_ENTRYPOINT_NOT_FOUND (TaskDialogIndirect só existe no comctl32 v6).
+[target.x86_64-pc-windows-msvc]
+runner = [
+    "powershell",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    "scripts/win-test-runner.ps1",
+]

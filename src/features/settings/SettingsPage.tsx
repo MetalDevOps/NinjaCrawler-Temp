@@ -178,6 +178,7 @@ export function SettingsPage() {
                       <div className="settings-select-row">
                         <span className="settings-key-chip">{setting.key}</span>
                         <select
+                          aria-describedby={setting.description ? `setting-description-${setting.key}` : undefined}
                           aria-label={setting.key}
                           className="settings-select"
                           disabled={!setting.mutable || Boolean(pendingCommand)}
@@ -194,6 +195,9 @@ export function SettingsPage() {
                           ))}
                         </select>
                       </div>
+                      {setting.description ? (
+                        <p className="settings-entry-description" id={`setting-description-${setting.key}`}>{setting.description}</p>
+                      ) : null}
                     </article>
                   )
                 }
@@ -206,6 +210,7 @@ export function SettingsPage() {
                         <input
                           type="checkbox"
                           className="settings-toggle"
+                          aria-describedby={setting.description ? `setting-description-${setting.key}` : undefined}
                           checked={currentValue === 'true'}
                           disabled={!setting.mutable || Boolean(pendingCommand)}
                           onChange={() => {
@@ -215,6 +220,9 @@ export function SettingsPage() {
                           }}
                         />
                       </label>
+                      {setting.description ? (
+                        <p className="settings-entry-description" id={`setting-description-${setting.key}`}>{setting.description}</p>
+                      ) : null}
                     </article>
                   )
                 }
@@ -222,8 +230,12 @@ export function SettingsPage() {
                 return (
                   <article className="settings-entry-card" data-locked={!setting.mutable || undefined} key={setting.key}>
                     <span className="settings-key-chip">{setting.key}</span>
+                    {setting.description ? (
+                      <p className="settings-entry-description" id={`setting-description-${setting.key}`}>{setting.description}</p>
+                    ) : null}
                     <div className="setting-input-row settings-entry-input-row">
                       <input
+                        aria-describedby={setting.description ? `setting-description-${setting.key}` : undefined}
                         aria-label={setting.key}
                         disabled={!setting.mutable}
                         value={currentValue}

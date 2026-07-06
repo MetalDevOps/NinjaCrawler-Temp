@@ -1,0 +1,12 @@
+# Espelho de src-tauri/.cargo/config.toml para quando o cargo roda a partir da
+# raiz do repositório (ex.: cargo test --manifest-path src-tauri/Cargo.toml).
+# Ver src-tauri/scripts/win-test-runner.ps1 para o porquê do runner.
+[target.x86_64-pc-windows-msvc]
+runner = [
+    "powershell",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    "src-tauri/scripts/win-test-runner.ps1",
+]

@@ -555,7 +555,6 @@ function defaultCriteria(): import('../../domain/models').SchedulerPlanCriteria 
     sitesExcluded: [],
     groupIdsIncluded: [],
     groupIdsExcluded: [],
-    groupsOnly: false,
     daysIsDownloaded: false,
     dateInRange: true,
   }

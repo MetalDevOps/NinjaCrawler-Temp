@@ -1,0 +1,4217 @@
+use super::*;
+
+pub(super) const INSTAGRAM_SYNC_RETRY_AFTER_FALLBACK_SECS: i64 = 10 * 60;
+pub(super) const INSTAGRAM_SYNC_COOLDOWN_UNTIL_SETTING_KEY: &str = "instagram.sync.cooldownUntil";
+pub(super) const SOURCE_SYNC_PROGRESS_POLL_MS: u64 = 900;
+/// `run_mode` da ação pontual "Refresh media stats" (TikTok): roda um sync
+/// normal com re-coleta de estatísticas da mídia existente, sem persistir nada
+/// nas opções do perfil.
+pub(super) const TIKTOK_REFRESH_MEDIA_STATS_RUN_MODE: &str = "refresh_media_stats";
+
+/// Lê uma setting em lista separada por vírgulas (trim, sem vazios).
+pub(super) fn parse_csv_provider_setting(
+    settings: &HashMap<String, String>,
+    key: &str,
+) -> Vec<String> {
+    settings
+        .get(key)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Campos de tolerância a erros do connector Instagram, lidos das settings da
+/// conta (skip list, gate de log e limite de aviso da seção Tagged).
+pub(super) fn instagram_error_policy_settings(
+    settings: &HashMap<String, String>,
+) -> (Vec<String>, bool, u32) {
+    let exclude = parse_csv_provider_setting(settings, "instagram.errors.skipErrorsExclude");
+    let log_skipped = parse_bool_setting(
+        settings
+            .get("instagram.errors.addSkippedErrorsToLog")
+            .map(String::as_str),
+        true,
+    );
+    let tagged_limit =
+        parse_u64_provider_setting(settings, "instagram.errors.taggedNotifyLimit", 25)
+            .min(u64::from(u32::MAX)) as u32;
+    (exclude, log_skipped, tagged_limit)
+}
+
+/// Monta o pacing de requests do Instagram a partir das settings da conta
+/// (timers espelhados do SCrawler; defaults idem).
+pub(super) fn instagram_request_pacing(
+    settings: &HashMap<String, String>,
+) -> instagram_connector::InstagramPacing {
+    instagram_connector::InstagramPacing {
+        base_delay_ms: parse_u64_provider_setting(settings, "instagram.timers.requestAnyMs", 1500),
+        extra_delay_ms: parse_u64_provider_setting(settings, "instagram.timers.requestMs", 1000),
+        counter_threshold: parse_u64_provider_setting(
+            settings,
+            "instagram.timers.requestCounter",
+            10,
+        )
+        .min(u64::from(u32::MAX)) as u32,
+        page_delay_ms: parse_u64_provider_setting(settings, "instagram.timers.postsLimitMs", 3000),
+    }
+}
+/// Grava a identidade estável do Instagram diretamente no perfil. O histórico
+/// de sync continua sendo uma fonte de recuperação para instalações antigas,
+/// mas não deve ser a única âncora porque o schema dos resumos evolui.
+pub(super) fn persist_instagram_user_id_hint(
+    connection: &Connection,
+    source_id: &str,
+    user_id: &str,
+    timestamp: &str,
+) -> Result<(), String> {
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return Ok(());
+    }
+    let Some(json) = connection
+        .query_row(
+            "SELECT sync_options_json FROM source_profiles WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut options = deserialize_source_sync_options("instagram", &json);
+    let instagram = options
+        .instagram
+        .get_or_insert_with(default_instagram_source_sync_options);
+    if let Some(existing_user_id) = instagram
+        .user_id_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if existing_user_id != user_id {
+            let history_user_id =
+                load_latest_instagram_profile_user_id_hint(connection, source_id)?;
+            if history_user_id.as_deref() != Some(user_id) {
+                return Err(format!(
+                    "Instagram identity mismatch for source '{source_id}': stored user id \
+                     '{existing_user_id}', resolved user id '{user_id}'."
+                ));
+            }
+        } else {
+            return Ok(());
+        }
+    }
+
+    instagram.user_id_hint = Some(user_id.to_string());
+    let serialized = serialize_source_sync_options("instagram", &options)?;
+    connection
+        .execute(
+            "UPDATE source_profiles SET sync_options_json = ?2, updated_at = ?3
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id, serialized, timestamp],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+/// Grava o `userIdHint` do Twitter no perfil após o primeiro sync bem-sucedido,
+/// quando ainda não havia um. Permite detectar renames e duplicatas futuras.
+pub(super) fn persist_twitter_user_id_hint(
+    connection: &Connection,
+    source_id: &str,
+    user_id: &str,
+    timestamp: &str,
+) -> Result<(), String> {
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return Ok(());
+    }
+    let Some(json) = connection
+        .query_row(
+            "SELECT sync_options_json FROM source_profiles WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut options =
+        serde_json::from_str::<SourceSyncOptions>(&json).unwrap_or_else(|_| SourceSyncOptions {
+            twitter: Some(normalize_twitter_source_sync_options(None)),
+            ..Default::default()
+        });
+    let twitter = options
+        .twitter
+        .get_or_insert_with(|| normalize_twitter_source_sync_options(None));
+    if twitter
+        .user_id_hint
+        .as_deref()
+        .map(str::trim)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
+        return Ok(()); // já preenchido, não sobrescreve
+    }
+    twitter.user_id_hint = Some(user_id.to_string());
+    let serialized = serialize_source_sync_options("twitter", &options)?;
+    connection
+        .execute(
+            "UPDATE source_profiles SET sync_options_json = ?2, updated_at = ?3
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id, serialized, timestamp],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+/// Grava o `userIdHint` do TikTok (uploader_id) após o primeiro sync, quando
+/// ainda não havia um. Permite detectar renames e duplicatas futuras.
+pub(super) fn persist_tiktok_user_id_hint(
+    connection: &Connection,
+    source_id: &str,
+    user_id: &str,
+    timestamp: &str,
+) -> Result<(), String> {
+    let user_id = user_id.trim();
+    if user_id.is_empty() {
+        return Ok(());
+    }
+    let Some(json) = connection
+        .query_row(
+            "SELECT sync_options_json FROM source_profiles WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let mut options =
+        serde_json::from_str::<SourceSyncOptions>(&json).unwrap_or_else(|_| SourceSyncOptions {
+            tiktok: Some(normalize_tiktok_source_sync_options(None)),
+            ..Default::default()
+        });
+    let tiktok = options
+        .tiktok
+        .get_or_insert_with(|| normalize_tiktok_source_sync_options(None));
+    if tiktok
+        .user_id_hint
+        .as_deref()
+        .map(str::trim)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    tiktok.user_id_hint = Some(user_id.to_string());
+    let serialized = serialize_source_sync_options("tiktok", &options)?;
+    connection
+        .execute(
+            "UPDATE source_profiles SET sync_options_json = ?2, updated_at = ?3
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![source_id, serialized, timestamp],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+pub(super) fn source_sync_cancel_registry() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+pub(super) fn register_source_sync_cancel_token(source_id: &str) -> Arc<AtomicBool> {
+    let token = Arc::new(AtomicBool::new(false));
+    if let Ok(mut registry) = source_sync_cancel_registry().lock() {
+        registry.insert(source_id.to_string(), Arc::clone(&token));
+    }
+    token
+}
+pub(super) fn clear_source_sync_cancel_token(source_id: &str) {
+    if let Ok(mut registry) = source_sync_cancel_registry().lock() {
+        registry.remove(source_id);
+    }
+}
+pub fn request_source_sync_cancel(source_id: &str) -> bool {
+    if let Ok(registry) = source_sync_cancel_registry().lock() {
+        if let Some(token) = registry.get(source_id) {
+            token.store(true, Ordering::SeqCst);
+            return true;
+        }
+    }
+
+    false
+}
+pub fn run_source_sync(
+    source_id: String,
+    trigger: Option<String>,
+    run_mode: Option<String>,
+    sync_options_override: Option<SourceSyncOptions>,
+) -> Result<WorkspaceSnapshot, String> {
+    let trigger_value = trigger
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("manual")
+        .to_string();
+
+    with_workspace(|connection, layout| {
+        run_source_sync_with_connection(
+            connection,
+            layout,
+            source_id,
+            &trigger_value,
+            run_mode.as_deref(),
+            sync_options_override.as_ref(),
+            &CommandToolExecutor,
+        )
+    })
+}
+pub fn check_source_availability(
+    source_ids: Vec<String>,
+    account_id_override: Option<String>,
+) -> Result<SourceAvailabilityCheckResult, String> {
+    with_workspace(|connection, layout| {
+        let unique_source_ids: Vec<String> = source_ids
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut tally = AvailabilityCheckTally::default();
+        let now = now_timestamp();
+        let normalized_account_id_override = account_id_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let account_override_error = normalized_account_id_override
+            .as_ref()
+            .map(|account_id| -> Result<Option<String>, String> {
+                let provider = connection
+                    .query_row(
+                        "SELECT provider FROM provider_accounts WHERE id = ?1 LIMIT 1",
+                        params![account_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(|error| error.to_string())?;
+
+                let Some(provider) = provider else {
+                    return Ok(Some(format!(
+                        "Selected availability account '{account_id}' was not found."
+                    )));
+                };
+
+                if !provider.eq_ignore_ascii_case("instagram") {
+                    return Ok(Some(format!(
+                        "Selected availability account '{account_id}' is not an Instagram account."
+                    )));
+                }
+
+                Ok(None)
+            })
+            .transpose()?
+            .flatten();
+
+        let mut session_cache: HashMap<String, (ParsedSessionPayload, HashMap<String, String>)> =
+            HashMap::new();
+
+        for (source_index, source_id) in unique_source_ids.iter().enumerate() {
+            let source_row = connection
+                .query_row(
+                    "SELECT id, provider, handle, sync_options_json, account_id
+                     FROM source_profiles
+                     WHERE id = ?1
+                       AND deleted_at IS NULL
+                     LIMIT 1",
+                    params![source_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+
+            let Some((id, provider, handle, sync_options_json, account_id)) = source_row else {
+                tally.failed += 1;
+                tally.items.push(SourceAvailabilityCheckItem {
+                    source_id: source_id.clone(),
+                    provider: "unknown".to_string(),
+                    previous_handle: String::new(),
+                    current_handle: None,
+                    status: "failed".to_string(),
+                    message: "Profile was not found in the workspace.".to_string(),
+                });
+                continue;
+            };
+
+            if !provider.eq_ignore_ascii_case("instagram") {
+                tally.skipped += 1;
+                tally.items.push(SourceAvailabilityCheckItem {
+                    source_id: id,
+                    provider,
+                    previous_handle: handle,
+                    current_handle: None,
+                    status: "skipped".to_string(),
+                    message:
+                        "Availability check is currently supported only for Instagram profiles."
+                            .to_string(),
+                });
+                continue;
+            }
+
+            let previous_handle = sanitize_source_handle("instagram", &handle);
+            if previous_handle.is_empty() {
+                tally.failed += 1;
+                tally.items.push(SourceAvailabilityCheckItem {
+                    source_id: id,
+                    provider,
+                    previous_handle: handle,
+                    current_handle: None,
+                    status: "failed".to_string(),
+                    message: "Profile handle is empty or invalid.".to_string(),
+                });
+                continue;
+            }
+
+            if let Some(message) = account_override_error.as_ref() {
+                tally.failed += 1;
+                tally.items.push(SourceAvailabilityCheckItem {
+                    source_id: id,
+                    provider,
+                    previous_handle,
+                    current_handle: None,
+                    status: "failed".to_string(),
+                    message: message.clone(),
+                });
+                continue;
+            }
+
+            let sync_options = deserialize_source_sync_options("instagram", &sync_options_json);
+            let source_user_id_hint = sync_options
+                .instagram
+                .as_ref()
+                .and_then(|instagram| instagram.user_id_hint.clone())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            let history_user_id_hint = load_latest_instagram_profile_user_id_hint(connection, &id)
+                .ok()
+                .flatten();
+            let user_id_hint = preferred_instagram_user_id_hint(
+                source_user_id_hint.as_deref(),
+                history_user_id_hint.as_deref(),
+            );
+
+            let selected_account_id = normalized_account_id_override
+                .as_deref()
+                .or(account_id.as_deref());
+            let auth_context_error = if let Some(acct_id) = selected_account_id {
+                if !session_cache.contains_key(acct_id) {
+                    match (|| -> Result<(ParsedSessionPayload, HashMap<String, String>), String> {
+                        let session = load_account_session_record(connection, acct_id)?
+                            .ok_or_else(|| "No session record".to_string())?;
+                        let secret =
+                            session_secret_store::load_secret(layout, &session.secret_ref)?;
+                        let parsed = parse_session_payload(&secret)?;
+                        let settings = load_provider_account_settings_map(connection, acct_id)?;
+                        Ok((parsed, settings))
+                    })() {
+                        Ok(ctx) => {
+                            session_cache.insert(acct_id.to_string(), ctx);
+                            None
+                        }
+                        Err(error) => {
+                            if normalized_account_id_override.is_some() {
+                                Some(format!(
+                                    "Selected availability account '{acct_id}' is not ready for authenticated checks: {error}"
+                                ))
+                            } else {
+                                None
+                            }
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(message) = auth_context_error {
+                tally.failed += 1;
+                tally.items.push(SourceAvailabilityCheckItem {
+                    source_id: id,
+                    provider,
+                    previous_handle,
+                    current_handle: None,
+                    status: "failed".to_string(),
+                    message,
+                });
+                continue;
+            }
+
+            let auth_context = if let Some(acct_id) = selected_account_id {
+                if !session_cache.contains_key(acct_id) {
+                    let loaded =
+                        (|| -> Result<(ParsedSessionPayload, HashMap<String, String>), String> {
+                            let session = load_account_session_record(connection, acct_id)?
+                                .ok_or_else(|| "No session record".to_string())?;
+                            let secret =
+                                session_secret_store::load_secret(layout, &session.secret_ref)?;
+                            let parsed = parse_session_payload(&secret)?;
+                            let settings = load_provider_account_settings_map(connection, acct_id)?;
+                            Ok((parsed, settings))
+                        })();
+                    if let Ok(ctx) = loaded {
+                        session_cache.insert(acct_id.to_string(), ctx);
+                    }
+                }
+                session_cache.get(acct_id)
+            } else {
+                None
+            };
+
+            let request = match auth_context {
+                Some((parsed_session, settings)) => {
+                    build_instagram_authenticated_identity_probe_request(
+                        &previous_handle,
+                        &parsed_session.cookies,
+                        settings,
+                        Some(&parsed_session.metadata),
+                    )
+                }
+                None => build_instagram_identity_probe_request(&previous_handle),
+            };
+
+            let primary = instagram_connector::resolve_profile_identity(&request, None);
+            if let Err(error) = &primary {
+                if instagram_error_indicates_availability_abort_rate_limit(error) {
+                    tally.failed += 1;
+                    tally.items.push(SourceAvailabilityCheckItem {
+                        source_id: id.clone(),
+                        provider: provider.clone(),
+                        previous_handle: previous_handle.clone(),
+                        current_handle: None,
+                        status: "failed".to_string(),
+                        message: format!(
+                            "Availability check aborted due to Instagram rate limiting (429): {error}"
+                        ),
+                    });
+                    for remaining_source_id in unique_source_ids.iter().skip(source_index + 1) {
+                        tally.skipped += 1;
+                        tally.items.push(build_availability_rate_limit_skipped_item(
+                            connection,
+                            remaining_source_id,
+                        ));
+                    }
+                    break;
+                }
+            }
+
+            let primary_classification = primary
+                .as_ref()
+                .err()
+                .map(|error| classify_instagram_identity_error(error));
+            let normalized_user_id_hint = user_id_hint
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let primary_identity_mismatch = match (&primary, normalized_user_id_hint) {
+                (Ok(identity), Some(expected_user_id)) => {
+                    identity.user_id.trim() != expected_user_id
+                }
+                _ => false,
+            };
+            let fallback = match (
+                primary_classification,
+                normalized_user_id_hint,
+                primary_identity_mismatch,
+            ) {
+                (_, Some(hint), true) => Some(instagram_connector::resolve_profile_identity(
+                    &request,
+                    Some(hint),
+                )),
+                (
+                    Some(InstagramIdentityErrorClassification::PrivateOrRestricted),
+                    Some(hint),
+                    false,
+                ) => Some(instagram_connector::resolve_profile_identity(
+                    &request,
+                    Some(hint),
+                )),
+                (
+                    Some(InstagramIdentityErrorClassification::UsernameUnresolvable),
+                    Some(hint),
+                    false,
+                ) => Some(instagram_connector::resolve_profile_identity(
+                    &request,
+                    Some(hint),
+                )),
+                _ => None,
+            };
+
+            if let Some(Err(error)) = fallback.as_ref() {
+                if instagram_error_indicates_availability_abort_rate_limit(error) {
+                    let rate_limit_error = error.clone();
+                    let action = decide_instagram_availability_action(
+                        &previous_handle,
+                        &primary,
+                        fallback.as_ref(),
+                    );
+                    apply_instagram_availability_action(
+                        connection,
+                        &id,
+                        &provider,
+                        &previous_handle,
+                        &now,
+                        action,
+                        &mut tally,
+                    )?;
+                    if let Some(last) = tally.items.last_mut() {
+                        last.message = format!(
+                            "{} Also aborted batch due to Instagram rate limiting (429) during hint fallback: {}",
+                            last.message, rate_limit_error
+                        );
+                    }
+
+                    for remaining_source_id in unique_source_ids.iter().skip(source_index + 1) {
+                        tally.skipped += 1;
+                        tally.items.push(build_availability_rate_limit_skipped_item(
+                            connection,
+                            remaining_source_id,
+                        ));
+                    }
+                    break;
+                }
+            }
+
+            let action =
+                decide_instagram_availability_action(&previous_handle, &primary, fallback.as_ref());
+            apply_instagram_availability_action(
+                connection,
+                &id,
+                &provider,
+                &previous_handle,
+                &now,
+                action,
+                &mut tally,
+            )?;
+        }
+
+        let snapshot = load_snapshot(connection, layout)?;
+        Ok(SourceAvailabilityCheckResult {
+            snapshot,
+            requested: unique_source_ids.len() as u32,
+            processed: tally.items.len() as u32,
+            unchanged: tally.unchanged,
+            updated_handle: tally.updated_handle,
+            marked_problem: tally.marked_problem,
+            skipped: tally.skipped,
+            failed: tally.failed,
+            items: tally.items,
+        })
+    })
+}
+pub fn run_instagram_saved_posts_sync(account_id: String) -> Result<WorkspaceSnapshot, String> {
+    with_workspace(|connection, layout| {
+        execute_instagram_saved_posts_sync_with_connection(
+            connection, layout, account_id, "manual",
+        )?;
+        load_snapshot(connection, layout)
+    })
+}
+pub fn queue_source_sync(
+    source_id: String,
+    sync_options_override: Option<SourceSyncOptions>,
+) -> Result<WorkspaceSnapshot, String> {
+    with_workspace(|connection, layout| {
+        let context = load_source_sync_context(connection, layout, &source_id)?;
+        validate_source_sync_override(&context.source, sync_options_override.as_ref())?;
+        load_snapshot(connection, layout)
+    })
+}
+pub fn source_sync_queue_item_seed(
+    source_id: String,
+    sync_options_override: Option<SourceSyncOptions>,
+) -> Result<SourceSyncQueueItemSeed, String> {
+    with_workspace(|connection, layout| {
+        let context = load_source_sync_context(connection, layout, &source_id)?;
+        validate_source_sync_override(&context.source, sync_options_override.as_ref())?;
+        Ok(SourceSyncQueueItemSeed {
+            source_id: context.source.id,
+            provider: context.source.provider,
+            handle: context.source.handle,
+            account_id: Some(context.account.id),
+        })
+    })
+}
+pub fn persist_source_sync_queue_job(job: &PersistedSourceSyncQueueJob) -> Result<(), String> {
+    with_workspace(|connection, _| {
+        let override_json = job
+            .sync_options_override
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        // Novos jobs entram ao final (maior order_index). O ON CONFLICT NÃO
+        // altera order_index para preservar a ordem manual de um job já na fila
+        // (ex.: promoção para force-backfill).
+        connection
+            .execute(
+                "INSERT INTO source_sync_queue_jobs
+                   (source_id, trigger, run_mode, sync_options_override_json, queued_at, order_index)
+                 VALUES (?1, ?2, ?3, ?4, ?5,
+                         (SELECT COALESCE(MAX(order_index), 0) + 1 FROM source_sync_queue_jobs))
+                 ON CONFLICT(source_id) DO UPDATE SET
+                   trigger = excluded.trigger,
+                   run_mode = excluded.run_mode,
+                   sync_options_override_json = excluded.sync_options_override_json,
+                   queued_at = excluded.queued_at",
+                params![
+                    job.source_id,
+                    job.trigger,
+                    job.run_mode,
+                    override_json,
+                    job.queued_at
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    })
+}
+/// Persiste a ordem manual (drag-and-drop) atribuindo `order_index` crescente
+/// conforme a posição em `ordered_source_ids`. Só afeta os jobs informados; a
+/// ordem relativa por provider é o que importa no restore.
+pub fn persist_source_sync_queue_order(ordered_source_ids: &[String]) -> Result<(), String> {
+    if ordered_source_ids.is_empty() {
+        return Ok(());
+    }
+    with_workspace(|connection, _| {
+        for (index, source_id) in ordered_source_ids.iter().enumerate() {
+            connection
+                .execute(
+                    "UPDATE source_sync_queue_jobs SET order_index = ?2 WHERE source_id = ?1",
+                    params![source_id, index as i64],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    })
+}
+pub fn remove_source_sync_queue_job(source_id: &str) -> Result<(), String> {
+    with_workspace(|connection, _| {
+        connection
+            .execute(
+                "DELETE FROM source_sync_queue_jobs WHERE source_id = ?1",
+                params![source_id],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    })
+}
+pub fn load_persisted_source_sync_queue_jobs() -> Result<Vec<PersistedSourceSyncQueueJob>, String> {
+    with_workspace(|connection, _| {
+        let mut statement = connection
+            .prepare(
+                "SELECT source_id, trigger, run_mode, sync_options_override_json, queued_at
+                 FROM source_sync_queue_jobs
+                 ORDER BY order_index ASC, queued_at ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+
+        let mut jobs = Vec::new();
+        for row in rows {
+            let (source_id, trigger, run_mode, override_json, queued_at) =
+                row.map_err(|error| error.to_string())?;
+            let sync_options_override = override_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<SourceSyncOptions>(json).ok());
+            jobs.push(PersistedSourceSyncQueueJob {
+                source_id,
+                trigger,
+                run_mode,
+                sync_options_override,
+                queued_at,
+            });
+        }
+        Ok(jobs)
+    })
+}
+pub(super) fn run_source_sync_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    source_id: String,
+    trigger: &str,
+    run_mode: Option<&str>,
+    sync_options_override: Option<&SourceSyncOptions>,
+    executor: &dyn ToolExecutor,
+) -> Result<WorkspaceSnapshot, String> {
+    execute_source_sync_with_connection(
+        connection,
+        layout,
+        source_id,
+        trigger,
+        run_mode,
+        sync_options_override,
+        executor,
+    )?;
+    load_snapshot(connection, layout)
+}
+pub(super) fn execute_source_sync_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    source_id: String,
+    trigger: &str,
+    run_mode: Option<&str>,
+    sync_options_override: Option<&SourceSyncOptions>,
+    executor: &dyn ToolExecutor,
+) -> Result<SourceSyncOutcome, String> {
+    let context = load_source_sync_context(connection, layout, &source_id)?;
+    let _connector_debug_context = connector_debug::enter(
+        context.source.id.clone(),
+        context.source.provider.clone(),
+        context.source.handle.clone(),
+    );
+    connector_debug::append_current(
+        "backend",
+        "system",
+        "sync.begin",
+        format!(
+            "source_id={}\nprovider={}\nhandle={}\ntrigger={trigger}\nrun_mode={}",
+            context.source.id,
+            context.source.provider,
+            context.source.handle,
+            run_mode.unwrap_or("default")
+        ),
+    );
+    validate_source_sync_override(&context.source, sync_options_override)?;
+    if context.source.provider.eq_ignore_ascii_case("instagram") {
+        let account_settings = load_provider_account_settings_map(connection, &context.account.id)?;
+        return execute_instagram_source_sync_with_connection(
+            connection,
+            layout,
+            &context,
+            &account_settings,
+            trigger,
+            run_mode,
+            sync_options_override,
+        );
+    }
+    if context.source.provider.eq_ignore_ascii_case("twitter") {
+        let account_settings = load_provider_account_settings_map(connection, &context.account.id)?;
+        return execute_twitter_source_sync_with_connection(
+            connection,
+            layout,
+            &context,
+            &account_settings,
+            trigger,
+            sync_options_override,
+        );
+    }
+    if context.source.provider.eq_ignore_ascii_case("tiktok") {
+        let account_settings = load_provider_account_settings_map(connection, &context.account.id)?;
+        return execute_tiktok_source_sync_with_connection(
+            connection,
+            layout,
+            &context,
+            &account_settings,
+            trigger,
+            run_mode,
+            sync_options_override,
+        );
+    }
+    let app_settings = load_app_settings_map(connection)?;
+
+    let invocation =
+        build_source_sync_invocation(connection, &context, layout, sync_options_override)?;
+    let started_at = now_timestamp();
+    let execution = executor.execute(&invocation);
+    clear_source_sync_cancel_token(&context.source.id);
+    let finished_at = now_timestamp();
+    let degraded_capabilities =
+        connector_degraded_capabilities(&context.source.provider, &context.account.capabilities);
+
+    let outcome = match execution {
+        Ok(result) => {
+            let validation_error = if degraded_capabilities.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "Connector runtime degraded capabilities: {}",
+                    degraded_capabilities.join(", ")
+                ))
+            };
+
+            let ingested_media_count = catalog_source_media_output(
+                connection,
+                &context,
+                &invocation.output_root,
+                &finished_at,
+            )?;
+
+            if !context.source.profile_image_custom {
+                let provider_avatar = match refresh_profile_picture_from_provider(
+                    connection,
+                    layout,
+                    &context,
+                    &invocation.output_root,
+                    &app_settings,
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let message = match error.level {
+                            ProfilePictureRefreshLogLevel::Info => format!(
+                                "Profile picture refresh skipped for '{}': {}",
+                                context.source.handle, error.message
+                            ),
+                            ProfilePictureRefreshLogLevel::Warning => format!(
+                                "Failed to refresh profile picture for '{}': {}",
+                                context.source.handle, error.message
+                            ),
+                        };
+                        log_runtime_event(
+                            layout,
+                            "sync.avatar",
+                            error.level.as_str(),
+                            RuntimeLogAnchor {
+                                account_id: Some(&context.account.id),
+                                provider: Some(&context.source.provider),
+                                source_id: Some(&context.source.id),
+                                source_handle: Some(&context.source.handle),
+                            },
+                            message,
+                            error.detail,
+                        );
+                        None
+                    }
+                };
+
+                let resolved_avatar =
+                    provider_avatar.or_else(|| find_source_avatar(&invocation.output_root));
+                if let Some(avatar_path) = resolved_avatar {
+                    let _ = update_source_profile_image(
+                        connection,
+                        &context.source.id,
+                        &avatar_path,
+                        &finished_at,
+                    );
+                }
+            }
+
+            SourceSyncOutcome {
+                tool: invocation.executable.clone(),
+                status: result.status,
+                summary: format_connector_sync_success_summary(
+                    ingested_media_count,
+                    &degraded_capabilities,
+                ),
+                command_preview: invocation.command_preview.clone(),
+                manifest_summary_json: None,
+                degraded_capabilities,
+                validation_error,
+            }
+        }
+        Err(error) => {
+            let cancelled_by_user = error
+                .trim()
+                .to_ascii_lowercase()
+                .contains("cancelled by user");
+
+            SourceSyncOutcome {
+                tool: invocation.executable.clone(),
+                status: "failed".to_string(),
+                summary: if cancelled_by_user {
+                    "Connector sync cancelled by user.".to_string()
+                } else {
+                    format!("Connector sync failed: {}", error)
+                },
+                command_preview: invocation.command_preview.clone(),
+                manifest_summary_json: None,
+                degraded_capabilities: Vec::new(),
+                validation_error: if cancelled_by_user { None } else { Some(error) },
+            }
+        }
+    };
+
+    persist_source_sync_run(
+        connection,
+        &context,
+        &outcome,
+        trigger,
+        &started_at,
+        &finished_at,
+    )?;
+    propagate_source_sync_account_health(connection, &context, &outcome, &finished_at)?;
+    Ok(outcome)
+}
+/// Executa o sync interno do X/Twitter, espelhando o contrato do SCrawler: o
+/// gallery-dl parseia a timeline e o NinjaCrawler baixa e cataloga a mídia,
+/// persistindo posts/mídia nos ledgers provider-neutral.
+pub(super) fn execute_twitter_source_sync_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    context: &SourceSyncContext,
+    settings: &HashMap<String, String>,
+    trigger: &str,
+    sync_options_override: Option<&SourceSyncOptions>,
+) -> Result<SourceSyncOutcome, String> {
+    let options = source_twitter_sync_options_with_override(&context.source, sync_options_override);
+    let started_at = now_timestamp();
+
+    let handle = sanitize_source_handle("twitter", &context.source.handle)
+        .trim_start_matches('@')
+        .to_string();
+    if handle.is_empty() {
+        return Err("Twitter source handle is empty.".to_string());
+    }
+
+    let profile_root =
+        resolved_source_media_output_root_with_connection(connection, layout, &context.source)?;
+    fs::create_dir_all(&profile_root).map_err(|error| error.to_string())?;
+    let cache_root = layout
+        .cache_root
+        .join(format!("twitter-sync-{}", context.source.id));
+
+    let parsed_session = parse_session_payload(&context.session_payload)?;
+    let cookies = parsed_session.cookies;
+    let cookie_file = cache_root.join("cookies.txt");
+    fs::create_dir_all(&cache_root).map_err(|error| error.to_string())?;
+    write_netscape_cookie_file(&cookie_file, &cookies)?;
+    let use_user_agent = settings
+        .get("twitter.auth.useUserAgent")
+        .map(|value| value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let user_agent = if use_user_agent {
+        settings
+            .get("twitter.auth.userAgent")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| parsed_session.metadata.user_agent.clone())
+    } else {
+        None
+    };
+    // UA usado para baixar o avatar (request consome `user_agent` por move).
+    let avatar_user_agent = user_agent
+        .clone()
+        .unwrap_or_else(|| "Mozilla/5.0".to_string());
+
+    let executable =
+        connector_runtime::resolve_connector_executable(connection, layout, "gallery-dl")?;
+
+    let ledger_post_keys =
+        load_provider_sync_post_ledger_keys(connection, "twitter", &context.source.id)?;
+    let ledger_media_keys =
+        load_provider_sync_media_ledger_keys(connection, "twitter", &context.source.id)?;
+    let existing_relative_paths = load_existing_relative_media_paths(&profile_root);
+
+    let request = twitter_connector::TwitterConnectorRequest {
+        handle: handle.clone(),
+        gallery_dl_executable: PathBuf::from(&executable),
+        cookie_file,
+        user_agent,
+        profile_root: profile_root.clone(),
+        cache_root,
+        models: twitter_model_selection(&options),
+        ledger_post_keys,
+        ledger_media_keys,
+        existing_relative_paths,
+        user_id_hint: options
+            .user_id_hint
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
+        abort_on_limit: options.abort_on_limit.unwrap_or(true),
+        download_already_parsed: options.download_already_parsed.unwrap_or(true),
+        sleep_timer_secs: options.sleep_timer_secs.unwrap_or(-1),
+        sleep_timer_before_first_secs: options.sleep_timer_before_first_secs.unwrap_or(-2),
+        download_images: options.download_images.unwrap_or(true),
+        download_videos: options.download_videos.unwrap_or(true),
+        download_gifs: options.download_gifs.unwrap_or(true),
+        separate_video_folder: options.separate_video_folder.unwrap_or(true),
+        gifs_special_folder: options.gifs_special_folder.clone().unwrap_or_default(),
+        gifs_prefix: options
+            .gifs_prefix
+            .clone()
+            .unwrap_or_else(|| "GIF_".to_string()),
+        allow_non_user_tweets: options.allow_non_user_tweets.unwrap_or(false),
+        use_md5_comparison: options.use_md5_comparison.unwrap_or(false),
+        search_use_graphql_endpoint: options.search_use_graphql_endpoint.unwrap_or(true),
+        profile_use_graphql_endpoint: options.profile_use_graphql_endpoint.unwrap_or(true),
+    };
+
+    let cancel_token = register_source_sync_cancel_token(&context.source.id);
+    if cancel_token.load(Ordering::SeqCst) {
+        clear_source_sync_cancel_token(&context.source.id);
+        return Err("source sync cancelled by user".to_string());
+    }
+
+    source_sync_runtime::report_source_sync_progress(
+        &context.source.id,
+        Some(0),
+        Some("Starting download".to_string()),
+        Some("Twitter connector is preparing source sync.".to_string()),
+        true,
+        Some(0),
+    );
+
+    // Primeiro sync: o connector resolve o user id das páginas e consulta este
+    // closure antes de baixar. Se o id já pertence a outro perfil, cancela.
+    let is_first_sync = context.source.last_synced_at.is_none();
+    let dup_source_id = context.source.id.clone();
+    let execution = twitter_connector::run_profile_sync(
+        &request,
+        |progress| {
+            source_sync_runtime::report_source_sync_progress(
+                &context.source.id,
+                progress.progress_percent,
+                Some(progress.label),
+                Some(progress.detail),
+                progress.indeterminate,
+                progress.downloaded_items,
+            );
+        },
+        || cancel_token.load(Ordering::SeqCst),
+        |user_id| {
+            is_first_sync
+                && find_source_with_same_user_id(connection, "twitter", user_id, &dup_source_id)
+                    .ok()
+                    .flatten()
+                    .is_some()
+        },
+    );
+    clear_source_sync_cancel_token(&context.source.id);
+    let finished_at = now_timestamp();
+
+    let command_preview = format!(
+        "internal.twitter profile {} -> {}",
+        handle,
+        profile_root.display()
+    );
+
+    let outcome = match execution {
+        Ok(result) => {
+            // Duplicado detectado no primeiro sync: remove o perfil recém-
+            // adicionado, informa e cancela (nada foi baixado).
+            if let Some(user_id) = result.duplicate_user_id.as_deref() {
+                if let Some(dup_outcome) = detect_duplicate_user_id_on_first_sync(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    "internal.twitter",
+                    command_preview.clone(),
+                ) {
+                    persist_source_sync_run(
+                        connection,
+                        context,
+                        &dup_outcome,
+                        trigger,
+                        &started_at,
+                        &finished_at,
+                    )?;
+                    source_sync_runtime::report_source_sync_progress(
+                        &context.source.id,
+                        Some(100),
+                        Some("Download cancelled".to_string()),
+                        Some(dup_outcome.summary.clone()),
+                        false,
+                        None,
+                    );
+                    return Ok(dup_outcome);
+                }
+            }
+
+            // Renomeação de conta: nenhum tweet veio sob o handle salvo, mas
+            // `x.com/i/user/<userIdHint>` resolveu para outro screen_name.
+            // Atualiza o perfil; o próximo sync baixa as mídias sob o novo handle.
+            if let Some(new_handle) = result.resolved_handle.as_deref() {
+                let new_handle = sanitize_source_handle("twitter", new_handle)
+                    .trim_start_matches('@')
+                    .to_string();
+                if !new_handle.is_empty() && !handle.eq_ignore_ascii_case(&new_handle) {
+                    let summary = match update_twitter_source_handle_after_sync(
+                        connection,
+                        &context.source.id,
+                        &new_handle,
+                        &finished_at,
+                    ) {
+                        Ok(()) => {
+                            log_runtime_event(
+        layout,
+        "sync.profile",
+        "info",
+        RuntimeLogAnchor {
+            account_id: Some(&context.account.id),
+            provider: Some(&context.source.provider),
+            source_id: Some(&context.source.id),
+            source_handle: Some(&context.source.handle),
+        },
+        format!(
+                                    "Twitter handle changed from '@{handle}' to '@{new_handle}'. Source handle updated automatically."
+                                ),
+        None,
+    );
+                            format!(
+                                "Twitter handle changed: @{handle} → @{new_handle}. Profile updated; run the sync again to download media under the new handle."
+                            )
+                        }
+                        Err(error) => {
+                            log_runtime_event(
+        layout,
+        "sync.profile",
+        "warning",
+        RuntimeLogAnchor {
+            account_id: Some(&context.account.id),
+            provider: Some(&context.source.provider),
+            source_id: Some(&context.source.id),
+            source_handle: Some(&context.source.handle),
+        },
+        format!(
+                                    "Twitter handle change detected (@{handle} → @{new_handle}) but updating the source failed: {error}"
+                                ),
+        Some(error),
+    );
+                            format!(
+                                "Twitter handle change detected (@{handle} → @{new_handle}) but the source update failed."
+                            )
+                        }
+                    };
+                    let outcome = SourceSyncOutcome {
+                        tool: "internal.twitter".to_string(),
+                        status: "succeeded".to_string(),
+                        summary,
+                        command_preview: command_preview.clone(),
+                        manifest_summary_json: None,
+                        degraded_capabilities: Vec::new(),
+                        validation_error: None,
+                    };
+                    persist_source_sync_run(
+                        connection,
+                        context,
+                        &outcome,
+                        trigger,
+                        &started_at,
+                        &finished_at,
+                    )?;
+                    propagate_source_sync_account_health(
+                        connection,
+                        context,
+                        &outcome,
+                        &finished_at,
+                    )?;
+                    source_sync_runtime::report_source_sync_progress(
+                        &context.source.id,
+                        Some(100),
+                        Some("Handle updated".to_string()),
+                        Some(outcome.summary.clone()),
+                        false,
+                        None,
+                    );
+                    return Ok(outcome);
+                }
+            }
+
+            upsert_provider_sync_post_ledger_entries(
+                connection,
+                "twitter",
+                &context.source.id,
+                &context.account.id,
+                &handle,
+                &result.observed_posts,
+                &finished_at,
+            )?;
+            upsert_provider_sync_media_ledger_entries(
+                connection,
+                &ProviderSyncMediaScope {
+                    provider: "twitter",
+                    source_id: &context.source.id,
+                    account_id: &context.account.id,
+                    source_handle: &handle,
+                    profile_root: &profile_root,
+                    timestamp: &finished_at,
+                },
+                &result.downloaded_media,
+            )?;
+            // Preenche o post key na mídia já no disco (baixada antes de o key ser
+            // gravado): casa pelo provider_media_key, só onde está vazio.
+            backfill_provider_sync_media_ledger_post_keys(
+                connection,
+                "twitter",
+                &context.source.id,
+                &result.media_post_links,
+                &finished_at,
+            )?;
+
+            // Persiste o user id resolvido para detectar renames/duplicatas depois.
+            if let Some(user_id) = result.resolved_user_id.as_deref() {
+                let _ = persist_twitter_user_id_hint(
+                    connection,
+                    &context.source.id,
+                    user_id,
+                    &finished_at,
+                );
+            }
+
+            // Avatar: baixa/atualiza a foto de perfil quando o usuário não
+            // definiu uma imagem custom. Usa a URL resolvida das páginas; se
+            // falhar (ou não houver URL), recorre a um avatar já presente na
+            // pasta, incluindo o UserPicture.jpg dos perfis importados.
+            if !context.source.profile_image_custom {
+                let provider_avatar = result.resolved_avatar_url.as_deref().and_then(|url| {
+                    match refresh_twitter_profile_picture(&profile_root, url, &avatar_user_agent) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            log_runtime_event(
+                                layout,
+                                "sync.avatar",
+                                error.level.as_str(),
+                                RuntimeLogAnchor {
+                                    account_id: Some(&context.account.id),
+                                    provider: Some(&context.source.provider),
+                                    source_id: Some(&context.source.id),
+                                    source_handle: Some(&context.source.handle),
+                                },
+                                format!(
+                                    "Failed to refresh Twitter profile picture for '{}': {}",
+                                    context.source.handle, error.message
+                                ),
+                                error.detail,
+                            );
+                            None
+                        }
+                    }
+                });
+                let resolved_avatar = provider_avatar.or_else(|| find_source_avatar(&profile_root));
+                if let Some(avatar_path) = resolved_avatar {
+                    let _ = update_source_profile_image(
+                        connection,
+                        &context.source.id,
+                        &avatar_path,
+                        &finished_at,
+                    );
+                }
+            }
+
+            let downloaded = result.downloaded_media.len();
+            let mut summary = format!(
+                "Twitter sync succeeded. Downloaded {} media items. Manifest parsed {} pages and queued {} assets.",
+                downloaded,
+                result.manifest_summary.parsed_page_count,
+                result.manifest_summary.queued_asset_count
+            );
+            if result.limit_aborted {
+                summary.push_str(" Rate limit reached; remaining models were skipped.");
+            }
+            if !result.section_errors.is_empty() {
+                summary.push_str(" Warnings: ");
+                summary.push_str(&result.section_errors.join(" | "));
+            }
+
+            SourceSyncOutcome {
+                tool: "internal.twitter".to_string(),
+                status: "succeeded".to_string(),
+                summary,
+                command_preview,
+                manifest_summary_json: None,
+                degraded_capabilities: Vec::new(),
+                validation_error: None,
+            }
+        }
+        Err(error) => {
+            let cancelled_by_user = error
+                .trim()
+                .to_ascii_lowercase()
+                .contains("cancelled by user");
+            SourceSyncOutcome {
+                tool: "internal.twitter".to_string(),
+                status: if cancelled_by_user {
+                    "skipped".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                summary: if cancelled_by_user {
+                    "Twitter sync cancelled by user.".to_string()
+                } else {
+                    format!("Twitter sync failed: {}", error)
+                },
+                command_preview,
+                manifest_summary_json: None,
+                degraded_capabilities: Vec::new(),
+                validation_error: if cancelled_by_user { None } else { Some(error) },
+            }
+        }
+    };
+
+    persist_source_sync_run(
+        connection,
+        context,
+        &outcome,
+        trigger,
+        &started_at,
+        &finished_at,
+    )?;
+    propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+    source_sync_runtime::report_source_sync_progress(
+        &context.source.id,
+        Some(100),
+        Some(if outcome.status == "succeeded" {
+            "Download complete".to_string()
+        } else if outcome.status == "skipped" {
+            "Download skipped".to_string()
+        } else {
+            "Download failed".to_string()
+        }),
+        Some(outcome.summary.clone()),
+        false,
+        None,
+    );
+    Ok(outcome)
+}
+/// Sync interno do TikTok: yt-dlp baixa os vídeos da timeline e o gallery-dl
+/// parseia os posts de fotos (slideshow), persistindo nos ledgers
+/// provider-neutral. Espelha o branch do Twitter.
+pub(super) fn execute_tiktok_source_sync_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    context: &SourceSyncContext,
+    settings: &HashMap<String, String>,
+    trigger: &str,
+    run_mode: Option<&str>,
+    sync_options_override: Option<&SourceSyncOptions>,
+) -> Result<SourceSyncOutcome, String> {
+    let options = source_tiktok_sync_options_with_override(&context.source, sync_options_override);
+    let started_at = now_timestamp();
+    // Ação pontual "Refresh media stats": um sync normal que também re-coleta
+    // as estatísticas da mídia já baixada, sem alterar as opções persistidas.
+    let stats_refresh_run = run_mode
+        .is_some_and(|value| value.eq_ignore_ascii_case(TIKTOK_REFRESH_MEDIA_STATS_RUN_MODE));
+    let timeline_enabled = options.get_timeline.unwrap_or(true);
+    let stories_enabled = options.get_stories_user.unwrap_or(false);
+    let reposts_enabled = options.get_reposts.unwrap_or(false);
+    let liked_videos_enabled = options.get_liked_videos.unwrap_or(false);
+    let liked_videos_limit = options.liked_videos_limit.unwrap_or(100);
+    let liked_videos_incremental = options.liked_videos_incremental.unwrap_or(true);
+    let liked_videos_known_page_threshold = options.liked_videos_known_page_threshold.unwrap_or(3);
+    let collect_media_stats = stats_refresh_run || options.collect_media_stats.unwrap_or(true);
+    let refresh_existing_media_stats = collect_media_stats
+        && (stats_refresh_run || options.refresh_existing_media_stats.unwrap_or(false));
+    if liked_videos_limit < 0 {
+        return Err("TikTok liked videos limit cannot be negative.".to_string());
+    }
+    if liked_videos_known_page_threshold < 1 {
+        return Err("TikTok liked videos known-page threshold must be at least 1.".to_string());
+    }
+    let target_video_url = options
+        .target_video_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let profile_sections_enabled =
+        timeline_enabled || stories_enabled || reposts_enabled || target_video_url.is_some();
+    if !profile_sections_enabled && !liked_videos_enabled {
+        return Err(
+            "No TikTok sync section is enabled. Select Timeline, User Stories, Reposts, or Liked videos."
+                .to_string(),
+        );
+    }
+
+    let handle = sanitize_source_handle("tiktok", &context.source.handle)
+        .trim_start_matches('@')
+        .to_string();
+    if handle.is_empty() {
+        return Err("TikTok source handle is empty.".to_string());
+    }
+
+    let profile_root =
+        resolved_source_media_output_root_with_connection(connection, layout, &context.source)?;
+    fs::create_dir_all(&profile_root).map_err(|error| error.to_string())?;
+    let cache_root = layout
+        .cache_root
+        .join(format!("tiktok-sync-{}", context.source.id));
+    fs::create_dir_all(&cache_root).map_err(|error| error.to_string())?;
+
+    let parsed_session = parse_session_payload(&context.session_payload)?;
+    let cookies = parsed_session.cookies;
+    let cookie_file = cache_root.join("cookies.txt");
+    write_netscape_cookie_file(&cookie_file, &cookies)?;
+    let use_user_agent = settings
+        .get("tiktok.auth.useUserAgent")
+        .map(|value| value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let user_agent = if use_user_agent {
+        settings
+            .get("tiktok.auth.userAgent")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| parsed_session.metadata.user_agent.clone())
+    } else {
+        None
+    };
+    let avatar_user_agent = user_agent
+        .clone()
+        .unwrap_or_else(|| "Mozilla/5.0".to_string());
+
+    let yt_dlp_executable =
+        connector_runtime::resolve_connector_executable(connection, layout, "yt-dlp")?;
+    // Usado só para os Stories (extractor `/stories` do gallery-dl).
+    let gallery_dl_executable = if stories_enabled || reposts_enabled {
+        connector_runtime::resolve_connector_executable(connection, layout, "gallery-dl")?
+    } else {
+        String::new()
+    };
+
+    let ledger_post_keys =
+        load_provider_sync_post_ledger_keys(connection, "tiktok", &context.source.id)?;
+    let ledger_media_keys =
+        load_provider_sync_media_ledger_keys(connection, "tiktok", &context.source.id)?;
+    let existing_relative_paths = load_existing_relative_media_paths(&profile_root);
+
+    let request = tiktok_connector::TikTokConnectorRequest {
+        handle: handle.clone(),
+        yt_dlp_executable: PathBuf::from(&yt_dlp_executable),
+        gallery_dl_executable: PathBuf::from(&gallery_dl_executable),
+        cookie_file,
+        user_agent,
+        profile_root: profile_root.clone(),
+        cache_root,
+        sections: tiktok_section_selection(&options),
+        target_video_url,
+        download_videos: options.download_videos.unwrap_or(true),
+        download_photos: options.download_photos.unwrap_or(true),
+        separate_video_folder: options.separate_video_folder.unwrap_or(false),
+        use_parsed_video_date: options.use_parsed_video_date.unwrap_or(true),
+        use_native_title: options.use_native_title.unwrap_or(false),
+        add_video_id_to_title: options.add_video_id_to_title.unwrap_or(true),
+        remove_tags_from_title: options.remove_tags_from_title.unwrap_or(false),
+        tokkit_naming: options.tokkit_file_naming.unwrap_or(false),
+        download_from_date: options.download_from_date.filter(|value| *value > 0),
+        download_to_date: options.download_to_date.filter(|value| *value > 0),
+        abort_on_limit: options.abort_on_limit.unwrap_or(true),
+        sleep_timer_secs: options.sleep_timer_secs.unwrap_or(-1),
+        collect_media_stats,
+        refresh_existing_media_stats,
+        ledger_post_keys,
+        ledger_media_keys,
+        existing_relative_paths,
+        user_id_hint: options
+            .user_id_hint
+            .clone()
+            .filter(|value| !value.trim().is_empty()),
+    };
+
+    let cancel_token = register_source_sync_cancel_token(&context.source.id);
+    if cancel_token.load(Ordering::SeqCst) {
+        clear_source_sync_cancel_token(&context.source.id);
+        return Err("source sync cancelled by user".to_string());
+    }
+
+    source_sync_runtime::report_source_sync_progress(
+        &context.source.id,
+        Some(0),
+        Some("Starting download".to_string()),
+        Some("TikTok connector is preparing source sync.".to_string()),
+        true,
+        Some(0),
+    );
+
+    let likes_execution = if liked_videos_enabled {
+        match source_sync_runtime::registered_app_handle() {
+            Ok(app) => tiktok_likes_runtime::run_source_sync(
+                &app,
+                tiktok_likes_runtime::TikTokLikesSourceRequest {
+                    account_id: context.account.id.clone(),
+                    source_id: context.source.id.clone(),
+                    source_handle: handle.clone(),
+                    profile_root: profile_root.clone(),
+                    item_limit: liked_videos_limit as usize,
+                    incremental: liked_videos_incremental,
+                    known_page_threshold: liked_videos_known_page_threshold as usize,
+                    collect_media_stats,
+                    refresh_existing_media_stats,
+                },
+                |percent, label, detail, indeterminate, downloaded| {
+                    let queue_percent = percent.map(|value| {
+                        if profile_sections_enabled {
+                            value / 2
+                        } else {
+                            value
+                        }
+                    });
+                    source_sync_runtime::report_source_sync_progress(
+                        &context.source.id,
+                        queue_percent,
+                        Some(label),
+                        Some(detail),
+                        indeterminate,
+                        downloaded,
+                    );
+                },
+                || cancel_token.load(Ordering::SeqCst),
+            ),
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(tiktok_likes_runtime::TikTokLikesSyncResult::default())
+    };
+    let is_first_sync = context.source.last_synced_at.is_none();
+    let dup_source_id = context.source.id.clone();
+    let combined_execution = match likes_execution {
+        Err(error) => Err(error),
+        Ok(likes) => {
+            let profile_execution = if profile_sections_enabled {
+                tiktok_connector::run_profile_sync(
+                    &request,
+                    |progress| {
+                        let queue_percent = progress.progress_percent.map(|value| {
+                            if liked_videos_enabled {
+                                50 + (value / 2)
+                            } else {
+                                value
+                            }
+                        });
+                        let downloaded_items = progress
+                            .downloaded_items
+                            .map(|value| value + likes.downloaded as u32);
+                        source_sync_runtime::report_source_sync_progress(
+                            &context.source.id,
+                            queue_percent,
+                            Some(progress.label),
+                            Some(progress.detail),
+                            progress.indeterminate,
+                            downloaded_items,
+                        );
+                    },
+                    || cancel_token.load(Ordering::SeqCst),
+                    |user_id| {
+                        is_first_sync
+                            && find_source_with_same_user_id(
+                                connection,
+                                "tiktok",
+                                user_id,
+                                &dup_source_id,
+                            )
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    },
+                )
+            } else {
+                Ok(tiktok_connector::TikTokConnectorResult {
+                    observed_posts: Vec::new(),
+                    downloaded_media: Vec::new(),
+                    section_errors: Vec::new(),
+                    rate_limited: false,
+                    limit_aborted: false,
+                    resolved_user_id: None,
+                    resolved_avatar_url: None,
+                    duplicate_user_id: None,
+                    resolved_handle: None,
+                    manifest_summary: tiktok_connector::TikTokManifestSummary::default(),
+                })
+            };
+            profile_execution.map(|result| (result, likes))
+        }
+    };
+    clear_source_sync_cancel_token(&context.source.id);
+    let finished_at = now_timestamp();
+
+    let command_preview = format!(
+        "internal.tiktok profile {} -> {}",
+        handle,
+        profile_root.display()
+    );
+
+    let outcome = match combined_execution {
+        Ok((result, likes)) => {
+            if let Some(user_id) = result.duplicate_user_id.as_deref() {
+                if let Some(dup_outcome) = detect_duplicate_user_id_on_first_sync(
+                    connection,
+                    layout,
+                    context,
+                    user_id,
+                    "internal.tiktok",
+                    command_preview.clone(),
+                ) {
+                    persist_source_sync_run(
+                        connection,
+                        context,
+                        &dup_outcome,
+                        trigger,
+                        &started_at,
+                        &finished_at,
+                    )?;
+                    source_sync_runtime::report_source_sync_progress(
+                        &context.source.id,
+                        Some(100),
+                        Some("Download cancelled".to_string()),
+                        Some(dup_outcome.summary.clone()),
+                        false,
+                        None,
+                    );
+                    return Ok(dup_outcome);
+                }
+            }
+
+            // Renomeação de conta: o connector descobriu o handle atual a partir
+            // de um post conhecido. Atualiza o perfil e encerra; o próximo sync
+            // baixa as mídias sob o novo handle (todas as rotas usam o handle).
+            if let Some(new_handle) = result.resolved_handle.as_deref() {
+                let new_handle = sanitize_source_handle("tiktok", new_handle)
+                    .trim_start_matches('@')
+                    .to_string();
+                if !new_handle.is_empty() && !handle.eq_ignore_ascii_case(&new_handle) {
+                    let summary = match update_tiktok_source_handle_after_sync(
+                        connection,
+                        &context.source.id,
+                        &new_handle,
+                        &finished_at,
+                    ) {
+                        Ok(()) => {
+                            log_runtime_event(
+        layout,
+        "sync.profile",
+        "info",
+        RuntimeLogAnchor {
+            account_id: Some(&context.account.id),
+            provider: Some(&context.source.provider),
+            source_id: Some(&context.source.id),
+            source_handle: Some(&context.source.handle),
+        },
+        format!(
+                                    "TikTok handle changed from '@{handle}' to '@{new_handle}'. Source handle updated automatically."
+                                ),
+        None,
+    );
+                            format!(
+                                "TikTok handle changed: @{handle} → @{new_handle}. Profile updated; run the sync again to download media under the new handle."
+                            )
+                        }
+                        Err(error) => {
+                            log_runtime_event(
+        layout,
+        "sync.profile",
+        "warning",
+        RuntimeLogAnchor {
+            account_id: Some(&context.account.id),
+            provider: Some(&context.source.provider),
+            source_id: Some(&context.source.id),
+            source_handle: Some(&context.source.handle),
+        },
+        format!(
+                                    "TikTok handle change detected (@{handle} → @{new_handle}) but updating the source failed: {error}"
+                                ),
+        Some(error),
+    );
+                            format!(
+                                "TikTok handle change detected (@{handle} → @{new_handle}) but the source update failed."
+                            )
+                        }
+                    };
+                    let outcome = SourceSyncOutcome {
+                        tool: "internal.tiktok".to_string(),
+                        status: "succeeded".to_string(),
+                        summary,
+                        command_preview: command_preview.clone(),
+                        manifest_summary_json: None,
+                        degraded_capabilities: Vec::new(),
+                        validation_error: None,
+                    };
+                    persist_source_sync_run(
+                        connection,
+                        context,
+                        &outcome,
+                        trigger,
+                        &started_at,
+                        &finished_at,
+                    )?;
+                    propagate_source_sync_account_health(
+                        connection,
+                        context,
+                        &outcome,
+                        &finished_at,
+                    )?;
+                    source_sync_runtime::report_source_sync_progress(
+                        &context.source.id,
+                        Some(100),
+                        Some("Handle updated".to_string()),
+                        Some(outcome.summary.clone()),
+                        false,
+                        None,
+                    );
+                    return Ok(outcome);
+                }
+            }
+
+            // Os ledgers são provider-neutral no banco; reusamos os structs do
+            // connector do Twitter (mesmos campos) só para a inserção.
+            let observed_posts: Vec<twitter_connector::ObservedTwitterPost> = result
+                .observed_posts
+                .iter()
+                .map(|post| twitter_connector::ObservedTwitterPost {
+                    provider_post_key: post.provider_post_key.clone(),
+                    media_section: post.media_section.clone(),
+                })
+                .collect();
+            let downloaded_media: Vec<twitter_connector::DownloadedTwitterMedia> = result
+                .downloaded_media
+                .iter()
+                .map(|media| twitter_connector::DownloadedTwitterMedia {
+                    file_path: media.file_path.clone(),
+                    media_type: media.media_type.clone(),
+                    media_section: media.media_section.clone(),
+                    provider_media_key: media.provider_media_key.clone(),
+                    provider_post_key: media.provider_post_key.clone(),
+                    captured_at_timestamp: media.captured_at_timestamp,
+                    final_file_name: media.final_file_name.clone(),
+                })
+                .collect();
+            upsert_provider_sync_post_ledger_entries(
+                connection,
+                "tiktok",
+                &context.source.id,
+                &context.account.id,
+                &handle,
+                &observed_posts,
+                &finished_at,
+            )?;
+            if collect_media_stats {
+                upsert_tiktok_post_stats(
+                    connection,
+                    &context.source.id,
+                    &result.observed_posts,
+                    &finished_at,
+                )?;
+            }
+            upsert_provider_sync_media_ledger_entries(
+                connection,
+                &ProviderSyncMediaScope {
+                    provider: "tiktok",
+                    source_id: &context.source.id,
+                    account_id: &context.account.id,
+                    source_handle: &handle,
+                    profile_root: &profile_root,
+                    timestamp: &finished_at,
+                },
+                &downloaded_media,
+            )?;
+
+            if let Some(user_id) = result.resolved_user_id.as_deref() {
+                let _ = persist_tiktok_user_id_hint(
+                    connection,
+                    &context.source.id,
+                    user_id,
+                    &finished_at,
+                );
+            }
+
+            if !context.source.profile_image_custom {
+                let provider_avatar = result.resolved_avatar_url.as_deref().and_then(|url| {
+                    match refresh_twitter_profile_picture(&profile_root, url, &avatar_user_agent) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            log_runtime_event(
+                                layout,
+                                "sync.avatar",
+                                error.level.as_str(),
+                                RuntimeLogAnchor {
+                                    account_id: Some(&context.account.id),
+                                    provider: Some(&context.source.provider),
+                                    source_id: Some(&context.source.id),
+                                    source_handle: Some(&context.source.handle),
+                                },
+                                format!(
+                                    "Failed to refresh TikTok profile picture for '{}': {}",
+                                    context.source.handle, error.message
+                                ),
+                                error.detail,
+                            );
+                            None
+                        }
+                    }
+                });
+                let resolved_avatar = provider_avatar.or_else(|| find_source_avatar(&profile_root));
+                if let Some(avatar_path) = resolved_avatar {
+                    let _ = update_source_profile_image(
+                        connection,
+                        &context.source.id,
+                        &avatar_path,
+                        &finished_at,
+                    );
+                }
+            }
+
+            let downloaded = result.downloaded_media.len() + likes.downloaded;
+            let stats_updated = likes.stats_updated
+                + result
+                    .observed_posts
+                    .iter()
+                    .filter(|post| {
+                        post.view_count.is_some()
+                            || post.like_count.is_some()
+                            || post.comment_count.is_some()
+                            || post.share_count.is_some()
+                    })
+                    .count();
+            let mut summary = format!(
+                "TikTok sync succeeded. Scanned {} post(s), found {} new post(s), downloaded {} media item(s).",
+                result.manifest_summary.normalized_post_count,
+                result.manifest_summary.queued_asset_count,
+                downloaded,
+            );
+            if collect_media_stats {
+                summary.push_str(&format!(
+                    " Stats: updated {} post(s){}.",
+                    stats_updated,
+                    if refresh_existing_media_stats {
+                        " including existing media"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            if liked_videos_enabled {
+                summary.push_str(&format!(
+                    " Liked videos: read {} pages, discovered {}, downloaded {}, skipped {} existing, failed {}{}.",
+                    likes.pages_read,
+                    likes.discovered,
+                    likes.downloaded,
+                    likes.skipped_existing,
+                    likes.failed,
+                    if likes.stopped_incrementally {
+                        ", stopped at the configured known-page threshold"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            if result.limit_aborted {
+                summary.push_str(" Rate limit reached; remaining posts were skipped.");
+            }
+            if !result.section_errors.is_empty() {
+                summary.push_str(" Warnings: ");
+                summary.push_str(&result.section_errors.join(" | "));
+            }
+
+            SourceSyncOutcome {
+                tool: "internal.tiktok".to_string(),
+                status: "succeeded".to_string(),
+                summary,
+                command_preview,
+                manifest_summary_json: None,
+                degraded_capabilities: Vec::new(),
+                validation_error: None,
+            }
+        }
+        Err(error) => {
+            let cancelled_by_user = error
+                .trim()
+                .to_ascii_lowercase()
+                .contains("cancelled by user");
+            SourceSyncOutcome {
+                tool: "internal.tiktok".to_string(),
+                status: if cancelled_by_user {
+                    "skipped".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                summary: if cancelled_by_user {
+                    "TikTok sync cancelled by user.".to_string()
+                } else {
+                    format!("TikTok sync failed: {}", error)
+                },
+                command_preview,
+                manifest_summary_json: None,
+                degraded_capabilities: Vec::new(),
+                validation_error: if cancelled_by_user { None } else { Some(error) },
+            }
+        }
+    };
+
+    persist_source_sync_run(
+        connection,
+        context,
+        &outcome,
+        trigger,
+        &started_at,
+        &finished_at,
+    )?;
+    propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+    source_sync_runtime::report_source_sync_progress(
+        &context.source.id,
+        Some(100),
+        Some(if outcome.status == "succeeded" {
+            "Download complete".to_string()
+        } else if outcome.status == "skipped" {
+            "Download skipped".to_string()
+        } else {
+            "Download failed".to_string()
+        }),
+        Some(outcome.summary.clone()),
+        false,
+        None,
+    );
+    Ok(outcome)
+}
+pub(super) struct SourceSyncContext {
+    pub(super) source: SourceProfile,
+    pub(super) account: ProviderAccount,
+    pub(super) session_payload: String,
+}
+pub(super) struct SourceSyncOutcome {
+    pub(super) tool: String,
+    pub(super) status: String,
+    pub(super) summary: String,
+    pub(super) command_preview: String,
+    pub(super) manifest_summary_json: Option<String>,
+    pub(super) degraded_capabilities: Vec<String>,
+    pub(super) validation_error: Option<String>,
+}
+pub(super) fn effective_instagram_sections_enabled(
+    sections: &instagram_connector::InstagramSectionSelection,
+) -> bool {
+    sections.timeline
+        || sections.reels
+        || sections.stories
+        || sections.stories_user
+        || sections.tagged
+}
+pub(super) fn instagram_request_has_base_auth(
+    request: &instagram_connector::InstagramConnectorRequest,
+) -> bool {
+    let has_cookie = request
+        .cookies
+        .iter()
+        .any(|cookie| !cookie.name.trim().is_empty() && !cookie.value.trim().is_empty());
+    let has_app_id = request
+        .headers
+        .app_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_csrf = request
+        .headers
+        .csrf_token
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    has_cookie && has_app_id && has_csrf
+}
+pub(super) fn read_instagram_sync_cooldown_until(
+    settings: &HashMap<String, String>,
+) -> Option<DateTime<Utc>> {
+    settings
+        .get(INSTAGRAM_SYNC_COOLDOWN_UNTIL_SETTING_KEY)
+        .and_then(|value| parse_rfc3339_utc(value))
+}
+pub(super) fn set_instagram_sync_cooldown(
+    connection: &Connection,
+    account_id: &str,
+    retry_after: Duration,
+    now: &str,
+) -> Result<DateTime<Utc>, String> {
+    let base_time = parse_rfc3339_utc(now).unwrap_or_else(Utc::now);
+    let until = base_time + retry_after;
+    upsert_provider_account_string_setting(
+        connection,
+        account_id,
+        INSTAGRAM_SYNC_COOLDOWN_UNTIL_SETTING_KEY,
+        &until.to_rfc3339(),
+        now,
+    )?;
+    Ok(until)
+}
+pub(super) fn clear_instagram_sync_cooldown(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<(), String> {
+    delete_provider_account_setting(
+        connection,
+        account_id,
+        INSTAGRAM_SYNC_COOLDOWN_UNTIL_SETTING_KEY,
+    )
+}
+pub(super) fn instagram_error_indicates_availability_abort_rate_limit(error: &str) -> bool {
+    instagram_error_indicates_rate_limit(error)
+        && !instagram_error_is_inconclusive_identity_probe(error)
+}
+pub(super) fn blocked_instagram_source_sync_outcome(
+    request: &instagram_connector::InstagramConnectorRequest,
+    status: &str,
+    summary: String,
+    validation_error: Option<String>,
+) -> Box<SourceSyncOutcome> {
+    // Boxed: este outcome viaja como variante `Err` pelos preflights, e o
+    // clippy aponta que carregar os 168+ bytes inline encarece cada `Result`.
+    Box::new(SourceSyncOutcome {
+        tool: "internal.instagram".to_string(),
+        status: status.to_string(),
+        summary,
+        command_preview: format!(
+            "internal.instagram profile {} -> {}",
+            request.username,
+            request.profile_root.display()
+        ),
+        manifest_summary_json: None,
+        degraded_capabilities: Vec::new(),
+        validation_error,
+    })
+}
+pub(super) fn validate_instagram_source_sync_preflight(
+    connection: &Connection,
+    context: &SourceSyncContext,
+    request: &instagram_connector::InstagramConnectorRequest,
+    settings: &HashMap<String, String>,
+    now: &str,
+) -> Result<(), Box<SourceSyncOutcome>> {
+    let current_time = parse_rfc3339_utc(now).unwrap_or_else(Utc::now);
+    if let Some(until) = read_instagram_sync_cooldown_until(settings) {
+        if until > current_time {
+            return Err(blocked_instagram_source_sync_outcome(
+                request,
+                "skipped",
+                format!(
+                    "Instagram sync skipped: provider cooldown is active until {}.",
+                    until.to_rfc3339()
+                ),
+                None,
+            ));
+        }
+        let _ = clear_instagram_sync_cooldown(connection, &context.account.id);
+    }
+
+    if !instagram_request_has_base_auth(request) {
+        let reason = "Instagram sync blocked: imported session is missing required base authentication data (cookies, app id, or csrf token).".to_string();
+        return Err(blocked_instagram_source_sync_outcome(
+            request,
+            "failed",
+            reason.clone(),
+            Some(reason),
+        ));
+    }
+
+    if !effective_instagram_sections_enabled(&request.sections) {
+        return Err(blocked_instagram_source_sync_outcome(
+            request,
+            "skipped",
+            "Instagram sync skipped: no enabled sections remain after account and source settings were applied.".to_string(),
+            None,
+        ));
+    }
+
+    Ok(())
+}
+/// Lê o `userIdHint` persistido nas opções de sync de um perfil, por provider.
+pub(super) fn source_user_id_hint_from_json(
+    provider: &str,
+    sync_options_json: &str,
+) -> Option<String> {
+    let options = serde_json::from_str::<SourceSyncOptions>(sync_options_json).ok()?;
+    let hint = if provider.eq_ignore_ascii_case("instagram") {
+        options.instagram.and_then(|value| value.user_id_hint)
+    } else if provider.eq_ignore_ascii_case("twitter") {
+        options.twitter.and_then(|value| value.user_id_hint)
+    } else {
+        None
+    };
+    hint.map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+/// Detecta, no primeiro sync de um perfil, se o `user_id` resolvido já pertence
+/// a outro perfil. Em caso afirmativo, remove o recém-adicionado (soft-delete,
+/// mantém mídia), registra no log e devolve um outcome explicativo a ser
+/// reportado. Só age no primeiro sync (`last_synced_at` vazio) para não mexer em
+/// perfis que já vinham sincronizando.
+pub(super) fn detect_duplicate_user_id_on_first_sync(
+    connection: &Connection,
+    layout: &StorageLayout,
+    context: &SourceSyncContext,
+    user_id: &str,
+    tool: &str,
+    command_preview: String,
+) -> Option<SourceSyncOutcome> {
+    // Configurável em Settings (policy.sync.blockDuplicateUserId). Desligado, a
+    // detecção de duplicados por user id no primeiro sync não age.
+    let enabled = load_app_setting_value(connection, DUPLICATE_USER_ID_BLOCK_SETTING_KEY)
+        .ok()
+        .flatten()
+        .map(|value| value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    if !enabled {
+        return None;
+    }
+    if context.source.last_synced_at.is_some() {
+        return None;
+    }
+    let existing = find_source_with_same_user_id(
+        connection,
+        &context.source.provider,
+        user_id,
+        &context.source.id,
+    )
+    .ok()
+    .flatten()?;
+    let (_existing_id, existing_handle) = existing;
+
+    // Remove o perfil duplicado recém-adicionado (mantém a mídia no disco).
+    let _ = delete_source_profile_with_connection(
+        connection,
+        layout,
+        context.source.id.clone(),
+        SourceProfileDeleteMode::UserOnly,
+    );
+
+    let summary = format!(
+        "'{}' is already registered as '{}' (same user id {}). The newly added duplicate profile was removed and the sync was cancelled.",
+        context.source.handle, existing_handle, user_id
+    );
+    log_runtime_event(
+        layout,
+        "sync.profile",
+        "warning",
+        RuntimeLogAnchor {
+            account_id: Some(&context.account.id),
+            provider: Some(&context.source.provider),
+            source_id: Some(&context.source.id),
+            source_handle: Some(&context.source.handle),
+        },
+        summary.clone(),
+        None,
+    );
+
+    Some(SourceSyncOutcome {
+        tool: tool.to_string(),
+        status: "skipped".to_string(),
+        summary,
+        command_preview,
+        manifest_summary_json: None,
+        degraded_capabilities: Vec::new(),
+        validation_error: None,
+    })
+}
+pub(super) fn resolve_instagram_source_identity_preflight(
+    connection: &Connection,
+    layout: &StorageLayout,
+    context: &SourceSyncContext,
+    source_options: &InstagramSourceSyncOptions,
+    request: &mut instagram_connector::InstagramConnectorRequest,
+    timestamp: &str,
+) -> Result<Option<String>, Box<SourceSyncOutcome>> {
+    let history_user_id_hint =
+        load_latest_instagram_profile_user_id_hint(connection, &context.source.id)
+            .ok()
+            .flatten();
+    let user_id_hint = preferred_instagram_user_id_hint(
+        instagram_user_id_hint(source_options),
+        history_user_id_hint.as_deref(),
+    );
+    let identity = match instagram_connector::resolve_profile_identity(
+        request,
+        user_id_hint.as_deref(),
+    ) {
+        Ok(identity) => identity,
+        Err(error) => match classify_instagram_identity_error(&error) {
+            InstagramIdentityErrorClassification::UsernameUnresolvable => {
+                let problem_code = "instagram_username_unresolvable";
+                let problem_message = format!(
+                        "Instagram username could not be resolved from '{}' (source id {}). This can indicate a renamed, disabled, or banned account.",
+                        context.source.handle, context.source.id
+                    );
+                let mark_error = set_source_sync_problem(
+                    connection,
+                    &context.source.id,
+                    problem_code,
+                    &problem_message,
+                    timestamp,
+                    true,
+                );
+                let mut summary = format!("Instagram sync blocked: {problem_message}");
+                if let Err(mark_failure) = mark_error {
+                    summary.push_str(&format!(
+                        " Failed to persist source problem marker: {mark_failure}."
+                    ));
+                } else {
+                    log_runtime_event(
+                        layout,
+                        "sync.profile",
+                        "warning",
+                        RuntimeLogAnchor {
+                            account_id: Some(&context.account.id),
+                            provider: Some(&context.source.provider),
+                            source_id: Some(&context.source.id),
+                            source_handle: Some(&context.source.handle),
+                        },
+                        format!(
+                            "Marked source '{}' as '{}': {}",
+                            context.source.handle, problem_code, problem_message
+                        ),
+                        // Preserva o erro técnico real do resolver de identidade para
+                        // diagnóstico (qual rota/endpoint falhou e com qual status).
+                        Some(format!("Identity resolver error: {error}")),
+                    );
+                }
+                return Err(blocked_instagram_source_sync_outcome(
+                    request,
+                    "failed",
+                    summary.clone(),
+                    Some(format!("{summary} (identity resolver error: {error})")),
+                ));
+            }
+            InstagramIdentityErrorClassification::PrivateOrRestricted => {
+                let problem_code = "instagram_profile_private_or_restricted";
+                let problem_message = format!(
+                    "Instagram profile '{}' (source id {}) appears private or restricted during identity preflight.",
+                    context.source.handle, context.source.id
+                );
+                let mark_error = set_source_sync_problem(
+                    connection,
+                    &context.source.id,
+                    problem_code,
+                    &problem_message,
+                    timestamp,
+                    false,
+                );
+                let mut summary = format!("Instagram sync skipped: {problem_message}");
+                if let Err(mark_failure) = mark_error {
+                    summary.push_str(&format!(
+                        " Failed to persist source problem marker: {mark_failure}."
+                    ));
+                } else {
+                    log_runtime_event(
+                        layout,
+                        "sync.profile",
+                        "info",
+                        RuntimeLogAnchor {
+                            account_id: Some(&context.account.id),
+                            provider: Some(&context.source.provider),
+                            source_id: Some(&context.source.id),
+                            source_handle: Some(&context.source.handle),
+                        },
+                        format!(
+                            "Marked source '{}' as '{}': {}",
+                            context.source.handle, problem_code, problem_message
+                        ),
+                        None,
+                    );
+                }
+                return Err(blocked_instagram_source_sync_outcome(
+                    request, "skipped", summary, None,
+                ));
+            }
+            InstagramIdentityErrorClassification::Other => {
+                return Err(blocked_instagram_source_sync_outcome(
+                    request,
+                    "failed",
+                    format!("Instagram sync failed during username validation: {error}"),
+                    Some(error),
+                ));
+            }
+        },
+    };
+
+    let resolved_handle = sanitize_source_handle("instagram", &identity.username);
+    if resolved_handle.is_empty() {
+        return Err(blocked_instagram_source_sync_outcome(
+            request,
+            "failed",
+            "Instagram sync failed during username validation: resolved username is empty."
+                .to_string(),
+            Some(
+                "Instagram sync failed during username validation: resolved username is empty."
+                    .to_string(),
+            ),
+        ));
+    }
+
+    // Primeiro sync: se o user id resolvido já pertence a outro perfil, este é
+    // um duplicado (handle novo de um usuário já cadastrado) — remove e cancela.
+    let resolved_user_id = identity.user_id.trim();
+    if !resolved_user_id.is_empty() {
+        if let Err(error) = persist_instagram_user_id_hint(
+            connection,
+            &context.source.id,
+            resolved_user_id,
+            timestamp,
+        ) {
+            let summary = format!(
+                "Instagram sync failed while persisting the stable profile identity: {error}"
+            );
+            return Err(blocked_instagram_source_sync_outcome(
+                request,
+                "failed",
+                summary.clone(),
+                Some(summary),
+            ));
+        }
+        if let Some(outcome) = detect_duplicate_user_id_on_first_sync(
+            connection,
+            layout,
+            context,
+            resolved_user_id,
+            "internal.instagram",
+            format!(
+                "internal.instagram profile {} -> identity preflight",
+                context.source.handle
+            ),
+        ) {
+            return Err(Box::new(outcome));
+        }
+    }
+
+    // Identity resolved successfully — clear any previous sync problem marker
+    // (e.g. instagram_username_unresolvable from a prior availability check).
+    if context.source.sync_problem_code.is_some() {
+        let _ = clear_source_sync_problem(connection, &context.source.id, timestamp);
+    }
+
+    request.username = resolved_handle.clone();
+    let current_handle = sanitize_source_handle("instagram", &context.source.handle);
+    if current_handle.eq_ignore_ascii_case(&resolved_handle) {
+        return Ok(None);
+    }
+
+    if instagram_force_update_user_name_enabled(source_options) {
+        match update_instagram_source_handle_after_sync(
+            connection,
+            &context.source.id,
+            &resolved_handle,
+            timestamp,
+        ) {
+            Ok(()) => {
+                let message = format!(
+                    "Instagram username changed from '{}' to '{}'. Source handle updated before sync.",
+                    context.source.handle, resolved_handle
+                );
+                log_runtime_event(
+                    layout,
+                    "sync.profile",
+                    "info",
+                    RuntimeLogAnchor {
+                        account_id: Some(&context.account.id),
+                        provider: Some(&context.source.provider),
+                        source_id: Some(&context.source.id),
+                        source_handle: Some(&context.source.handle),
+                    },
+                    message,
+                    None,
+                );
+                Ok(Some(format!(
+                    " Username changed from '{}' to '{}'.",
+                    context.source.handle, resolved_handle
+                )))
+            }
+            Err(error) => {
+                let message = format!(
+                    "Instagram username change detected ({} -> {}), but source handle preflight update failed: {}",
+                    context.source.handle, resolved_handle, error
+                );
+                log_runtime_event(
+                    layout,
+                    "sync.profile",
+                    "warning",
+                    RuntimeLogAnchor {
+                        account_id: Some(&context.account.id),
+                        provider: Some(&context.source.provider),
+                        source_id: Some(&context.source.id),
+                        source_handle: Some(&context.source.handle),
+                    },
+                    message,
+                    Some(error),
+                );
+                Ok(Some(format!(
+                    " Username changed from '{}' to '{}' (auto-update failed).",
+                    context.source.handle, resolved_handle
+                )))
+            }
+        }
+    } else {
+        let message = format!(
+            "Instagram username change detected ({} -> {}), but source auto-update is disabled.",
+            context.source.handle, resolved_handle
+        );
+        log_runtime_event(
+            layout,
+            "sync.profile",
+            "info",
+            RuntimeLogAnchor {
+                account_id: Some(&context.account.id),
+                provider: Some(&context.source.provider),
+                source_id: Some(&context.source.id),
+                source_handle: Some(&context.source.handle),
+            },
+            message,
+            None,
+        );
+        Ok(Some(format!(
+            " Username changed from '{}' to '{}' (auto-update disabled).",
+            context.source.handle, resolved_handle
+        )))
+    }
+}
+pub(super) fn set_source_sync_problem(
+    connection: &Connection,
+    source_id: &str,
+    code: &str,
+    message: &str,
+    timestamp: &str,
+    disable_ready_for_download: bool,
+) -> Result<(), String> {
+    if disable_ready_for_download {
+        connection
+            .execute(
+                "UPDATE source_profiles
+                 SET sync_problem_code = ?2,
+                     sync_problem_message = ?3,
+                     sync_problem_at = ?4,
+                     ready_for_download = 0,
+                     updated_at = ?4
+                 WHERE id = ?1
+                   AND deleted_at IS NULL",
+                params![source_id, code, message, timestamp],
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        connection
+            .execute(
+                "UPDATE source_profiles
+                 SET sync_problem_code = ?2,
+                     sync_problem_message = ?3,
+                     sync_problem_at = ?4,
+                     updated_at = ?4
+                 WHERE id = ?1
+                   AND deleted_at IS NULL",
+                params![source_id, code, message, timestamp],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum InstagramAvailabilityAction {
+    AbortedRateLimited(String),
+    Resolved {
+        resolved_handle: String,
+        handle_changed: bool,
+    },
+    MarkPrivateOrRestricted {
+        resolved_handle: Option<String>,
+        handle_changed: bool,
+    },
+    MarkUsernameUnresolvable,
+    Failed(String),
+}
+pub(super) fn decide_instagram_availability_action(
+    previous_handle: &str,
+    primary: &Result<instagram_connector::InstagramProfileIdentity, String>,
+    fallback: Option<&Result<instagram_connector::InstagramProfileIdentity, String>>,
+) -> InstagramAvailabilityAction {
+    match primary {
+        Ok(identity) => {
+            let identity = match fallback {
+                Some(Ok(identity)) => identity,
+                Some(Err(error)) => {
+                    return InstagramAvailabilityAction::Failed(format!(
+                        "The current username resolved to a different Instagram account, and the \
+                         stored identity could not be resolved: {error}"
+                    ));
+                }
+                None => identity,
+            };
+            let resolved_handle = sanitize_source_handle("instagram", &identity.username);
+            let handle_changed = !resolved_handle.eq_ignore_ascii_case(previous_handle);
+            InstagramAvailabilityAction::Resolved {
+                resolved_handle,
+                handle_changed,
+            }
+        }
+        Err(primary_error) => {
+            if instagram_error_indicates_availability_abort_rate_limit(primary_error) {
+                return InstagramAvailabilityAction::AbortedRateLimited(primary_error.clone());
+            }
+            match classify_instagram_identity_error(primary_error) {
+                InstagramIdentityErrorClassification::PrivateOrRestricted => {
+                    let resolved_handle = fallback.and_then(|result| {
+                        result
+                            .as_ref()
+                            .ok()
+                            .map(|identity| sanitize_source_handle("instagram", &identity.username))
+                            .filter(|value| !value.is_empty())
+                    });
+                    let handle_changed = resolved_handle
+                        .as_deref()
+                        .map(|value| !value.eq_ignore_ascii_case(previous_handle))
+                        .unwrap_or(false);
+                    InstagramAvailabilityAction::MarkPrivateOrRestricted {
+                        resolved_handle,
+                        handle_changed,
+                    }
+                }
+                InstagramIdentityErrorClassification::UsernameUnresolvable => {
+                    if let Some(Ok(identity)) = fallback {
+                        let resolved_handle =
+                            sanitize_source_handle("instagram", &identity.username);
+                        let handle_changed = !resolved_handle.eq_ignore_ascii_case(previous_handle);
+                        return InstagramAvailabilityAction::Resolved {
+                            resolved_handle,
+                            handle_changed,
+                        };
+                    }
+                    InstagramAvailabilityAction::MarkUsernameUnresolvable
+                }
+                InstagramIdentityErrorClassification::Other => {
+                    InstagramAvailabilityAction::Failed(primary_error.clone())
+                }
+            }
+        }
+    }
+}
+/// Acumulador de contadores e itens por perfil durante um availability check.
+#[derive(Default)]
+pub(super) struct AvailabilityCheckTally {
+    pub(super) unchanged: u32,
+    pub(super) updated_handle: u32,
+    pub(super) marked_problem: u32,
+    pub(super) skipped: u32,
+    pub(super) failed: u32,
+    pub(super) items: Vec<SourceAvailabilityCheckItem>,
+}
+pub(super) fn apply_instagram_availability_action(
+    connection: &Connection,
+    source_id: &str,
+    provider: &str,
+    previous_handle: &str,
+    now: &str,
+    action: InstagramAvailabilityAction,
+    tally: &mut AvailabilityCheckTally,
+) -> Result<(), String> {
+    match action {
+        InstagramAvailabilityAction::AbortedRateLimited(error) => {
+            tally.failed += 1;
+            tally.items.push(SourceAvailabilityCheckItem {
+                source_id: source_id.to_string(),
+                provider: provider.to_string(),
+                previous_handle: previous_handle.to_string(),
+                current_handle: None,
+                status: "failed".to_string(),
+                message: format!(
+                    "Availability check aborted due to Instagram rate limiting (429): {error}"
+                ),
+            });
+            Ok(())
+        }
+        InstagramAvailabilityAction::Resolved {
+            resolved_handle,
+            handle_changed,
+        } => {
+            if resolved_handle.trim().is_empty() {
+                tally.failed += 1;
+                tally.items.push(SourceAvailabilityCheckItem {
+                    source_id: source_id.to_string(),
+                    provider: provider.to_string(),
+                    previous_handle: previous_handle.to_string(),
+                    current_handle: None,
+                    status: "failed".to_string(),
+                    message: "Resolved username is empty.".to_string(),
+                });
+                return Ok(());
+            }
+
+            if !handle_changed {
+                let _ = clear_source_sync_problem(connection, source_id, now);
+                tally.unchanged += 1;
+                tally.items.push(SourceAvailabilityCheckItem {
+                    source_id: source_id.to_string(),
+                    provider: provider.to_string(),
+                    previous_handle: previous_handle.to_string(),
+                    current_handle: Some(resolved_handle),
+                    status: "unchanged".to_string(),
+                    message: "Profile is still available with the same handle.".to_string(),
+                });
+                return Ok(());
+            }
+
+            match update_instagram_source_handle_after_sync(
+                connection,
+                source_id,
+                &resolved_handle,
+                now,
+            ) {
+                Ok(()) => {
+                    let _ = clear_source_sync_problem(connection, source_id, now);
+                    tally.updated_handle += 1;
+                    tally.items.push(SourceAvailabilityCheckItem {
+                        source_id: source_id.to_string(),
+                        provider: provider.to_string(),
+                        previous_handle: previous_handle.to_string(),
+                        current_handle: Some(resolved_handle),
+                        status: "updated_handle".to_string(),
+                        message: "Handle was updated using current provider identity.".to_string(),
+                    });
+                }
+                Err(error) => {
+                    tally.failed += 1;
+                    tally.items.push(SourceAvailabilityCheckItem {
+                        source_id: source_id.to_string(),
+                        provider: provider.to_string(),
+                        previous_handle: previous_handle.to_string(),
+                        current_handle: Some(resolved_handle),
+                        status: "failed".to_string(),
+                        message: format!(
+                            "Handle change was detected, but local update failed: {error}"
+                        ),
+                    });
+                }
+            }
+
+            Ok(())
+        }
+        InstagramAvailabilityAction::MarkPrivateOrRestricted {
+            resolved_handle,
+            handle_changed,
+        } => {
+            let problem_message = format!(
+                "Instagram profile '{}' (source id {}) appears to be private or temporarily restricted. This is informative and does not disable download readiness.",
+                previous_handle, source_id
+            );
+            let marker = set_source_sync_problem(
+                connection,
+                source_id,
+                "instagram_profile_private_or_restricted",
+                &problem_message,
+                now,
+                false,
+            );
+            tally.marked_problem += 1;
+
+            let mut handle_update_error: Option<String> = None;
+            let mut handle_updated = false;
+            if let (Some(resolved_handle), true) = (resolved_handle.clone(), handle_changed) {
+                if !resolved_handle.trim().is_empty() {
+                    match update_instagram_source_handle_after_sync(
+                        connection,
+                        source_id,
+                        &resolved_handle,
+                        now,
+                    ) {
+                        Ok(()) => {
+                            handle_updated = true;
+                            tally.updated_handle += 1;
+                        }
+                        Err(error) => handle_update_error = Some(error),
+                    }
+                }
+            }
+
+            tally.items.push(SourceAvailabilityCheckItem {
+                source_id: source_id.to_string(),
+                provider: provider.to_string(),
+                previous_handle: previous_handle.to_string(),
+                current_handle: resolved_handle.clone(),
+                status: if handle_updated {
+                    "updated_handle".to_string()
+                } else {
+                    "marked_problem".to_string()
+                },
+                message: if let Err(marker_error) = marker {
+                    format!("{problem_message} Failed to persist problem marker: {marker_error}")
+                } else if let Some(error) = handle_update_error {
+                    format!(
+                        "{problem_message} Handle update attempt failed: {error}"
+                    )
+                } else if handle_updated {
+                    "Handle was updated using current provider identity; profile still appears private/restricted.".to_string()
+                } else {
+                    problem_message
+                },
+            });
+
+            Ok(())
+        }
+        InstagramAvailabilityAction::MarkUsernameUnresolvable => {
+            let problem_message = format!(
+                "Instagram username could not be resolved from '{}' (source id {}). This can indicate a renamed, disabled, or banned account.",
+                previous_handle, source_id
+            );
+            let marker = set_source_sync_problem(
+                connection,
+                source_id,
+                "instagram_username_unresolvable",
+                &problem_message,
+                now,
+                true,
+            );
+            tally.marked_problem += 1;
+            tally.items.push(SourceAvailabilityCheckItem {
+                source_id: source_id.to_string(),
+                provider: provider.to_string(),
+                previous_handle: previous_handle.to_string(),
+                current_handle: None,
+                status: "marked_problem".to_string(),
+                message: if let Err(marker_error) = marker {
+                    format!("{problem_message} Failed to persist problem marker: {marker_error}")
+                } else {
+                    problem_message
+                },
+            });
+            Ok(())
+        }
+        InstagramAvailabilityAction::Failed(error) => {
+            tally.failed += 1;
+            tally.items.push(SourceAvailabilityCheckItem {
+                source_id: source_id.to_string(),
+                provider: provider.to_string(),
+                previous_handle: previous_handle.to_string(),
+                current_handle: None,
+                status: "failed".to_string(),
+                message: format!("Availability check failed: {error}"),
+            });
+            Ok(())
+        }
+    }
+}
+pub(super) fn build_availability_rate_limit_skipped_item(
+    connection: &Connection,
+    source_id: &str,
+) -> SourceAvailabilityCheckItem {
+    let row = connection
+        .query_row(
+            "SELECT provider, handle
+             FROM source_profiles
+             WHERE id = ?1
+               AND deleted_at IS NULL
+             LIMIT 1",
+            params![source_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional();
+
+    let (provider, previous_handle) = match row {
+        Ok(Some((provider, handle))) => (provider, handle),
+        _ => ("unknown".to_string(), source_id.to_string()),
+    };
+
+    SourceAvailabilityCheckItem {
+        source_id: source_id.to_string(),
+        provider,
+        previous_handle,
+        current_handle: None,
+        status: "skipped".to_string(),
+        message: "Skipped because availability check was aborted after a 429 Too Many Requests."
+            .to_string(),
+    }
+}
+pub(super) fn clear_source_sync_problem(
+    connection: &Connection,
+    source_id: &str,
+    timestamp: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "UPDATE source_profiles
+             SET sync_problem_code = NULL,
+                 sync_problem_message = NULL,
+                 sync_problem_at = NULL,
+                 ready_for_download = 1,
+                 updated_at = ?2
+             WHERE id = ?1
+               AND deleted_at IS NULL",
+            params![source_id, timestamp],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+pub(super) fn load_latest_instagram_profile_user_id_hint(
+    connection: &Connection,
+    source_id: &str,
+) -> Result<Option<String>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT manifest_summary_json
+             FROM source_sync_runs
+             WHERE source_id = ?1
+               AND provider = 'instagram'
+               AND status = 'succeeded'
+               AND manifest_summary_json IS NOT NULL
+             ORDER BY finished_at DESC
+             LIMIT 25",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![source_id], |row| row.get::<_, Option<String>>(0))
+        .map_err(|error| error.to_string())?;
+    for row in rows {
+        let Some(raw_json) = row.map_err(|error| error.to_string())? else {
+            continue;
+        };
+        let Ok(summary) = serde_json::from_str::<serde_json::Value>(&raw_json) else {
+            continue;
+        };
+        let Some(user_id) = summary
+            .get("profileUserId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        return Ok(Some(user_id.to_string()));
+    }
+
+    Ok(None)
+}
+pub(super) struct AccountSyncOutcome {
+    pub(super) tool: String,
+    pub(super) status: String,
+    pub(super) summary: String,
+    pub(super) command_preview: String,
+}
+pub(super) fn load_account_sync_context(
+    connection: &Connection,
+    layout: &StorageLayout,
+    account_id: &str,
+) -> Result<AccountSyncContext, String> {
+    let account = load_provider_account_by_id(connection, account_id)?;
+    let session = load_account_session_record(connection, account_id)?
+        .ok_or_else(|| format!("Provider account '{}' has no stored session.", account_id))?;
+    let session_payload = session_secret_store::load_secret(layout, &session.secret_ref)?;
+    let settings = load_provider_account_settings_map(connection, account_id)?;
+
+    Ok(AccountSyncContext {
+        account,
+        settings,
+        session_payload,
+    })
+}
+pub(super) fn execute_instagram_source_sync_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    context: &SourceSyncContext,
+    settings: &HashMap<String, String>,
+    trigger: &str,
+    run_mode: Option<&str>,
+    sync_options_override: Option<&SourceSyncOptions>,
+) -> Result<SourceSyncOutcome, String> {
+    let source_options =
+        source_instagram_sync_options_with_override(&context.source, sync_options_override);
+    let started_at = now_timestamp();
+    let mut request = build_instagram_profile_sync_request(
+        connection,
+        context,
+        layout,
+        settings,
+        run_mode,
+        sync_options_override,
+    )?;
+    let mut preflight_handle_change_suffix = String::new();
+    if let Err(outcome) = validate_instagram_source_sync_preflight(
+        connection,
+        context,
+        &request,
+        settings,
+        &started_at,
+    ) {
+        persist_source_sync_run(
+            connection,
+            context,
+            &outcome,
+            trigger,
+            &started_at,
+            &started_at,
+        )?;
+        propagate_source_sync_account_health(connection, context, &outcome, &started_at)?;
+        source_sync_runtime::report_source_sync_progress(
+            &context.source.id,
+            Some(0),
+            Some(if outcome.status == "skipped" {
+                "Download skipped".to_string()
+            } else {
+                "Download failed".to_string()
+            }),
+            Some(outcome.summary.clone()),
+            false,
+            None,
+        );
+        return Ok(*outcome);
+    }
+
+    let identity_preflight = resolve_instagram_source_identity_preflight(
+        connection,
+        layout,
+        context,
+        &source_options,
+        &mut request,
+        &started_at,
+    );
+    match identity_preflight {
+        Ok(Some(suffix)) => preflight_handle_change_suffix = suffix,
+        Ok(None) => {}
+        Err(outcome) => {
+            persist_source_sync_run(
+                connection,
+                context,
+                &outcome,
+                trigger,
+                &started_at,
+                &started_at,
+            )?;
+            propagate_source_sync_account_health(connection, context, &outcome, &started_at)?;
+            source_sync_runtime::report_source_sync_progress(
+                &context.source.id,
+                Some(0),
+                Some("Download failed".to_string()),
+                Some(outcome.summary.clone()),
+                false,
+                None,
+            );
+            return Ok(*outcome);
+        }
+    }
+
+    let cancel_token = register_source_sync_cancel_token(&context.source.id);
+
+    if cancel_token.load(Ordering::SeqCst) {
+        clear_source_sync_cancel_token(&context.source.id);
+        return Err("source sync cancelled by user".to_string());
+    }
+
+    source_sync_runtime::report_source_sync_progress(
+        &context.source.id,
+        Some(0),
+        Some("Starting download".to_string()),
+        Some("Instagram connector is preparing source sync.".to_string()),
+        true,
+        Some(0),
+    );
+
+    let execution = instagram_connector::run_profile_sync(
+        &request,
+        |progress| {
+            source_sync_runtime::report_source_sync_progress(
+                &context.source.id,
+                progress.progress_percent,
+                Some(progress.label),
+                Some(progress.detail),
+                progress.indeterminate,
+                progress.downloaded_items,
+            );
+        },
+        || cancel_token.load(Ordering::SeqCst),
+    );
+    clear_source_sync_cancel_token(&context.source.id);
+    let finished_at = now_timestamp();
+
+    let outcome = match execution {
+        Ok(result) => {
+            let mut source_handle =
+                sanitize_source_handle(&context.source.provider, &request.username);
+            let mut handle_change_suffix = preflight_handle_change_suffix.clone();
+            let mut description_update_suffix = String::new();
+            let mut cooldown_suffix = String::new();
+            let force_update_user_name = instagram_force_update_user_name_enabled(&source_options);
+            let force_update_user_information =
+                instagram_force_update_user_information_enabled(&source_options);
+
+            persist_instagram_runtime_auth_headers(
+                connection,
+                &context.account.id,
+                &result.updated_headers,
+                &finished_at,
+            )?;
+
+            // Diagnóstico (nível debug): por seção de stories/highlights, registra
+            // onde os itens descobertos somem (filtro de data vs dedupe vs já
+            // existente). Útil para investigar highlights subdimensionados.
+            if let Some(summary) = result.manifest_summary.as_ref() {
+                for section in &summary.sections {
+                    if section.section != "stories" && section.section != "stories_user" {
+                        continue;
+                    }
+                    let message = format!(
+                        "Highlights diagnostic — {}: discovered={}, skipped_out_of_range_date={}, skipped_existing_post={}, skipped_duplicate_post={}, skipped_unavailable_post={}, skipped_existing_asset={}, queued_assets={}",
+                        section.label,
+                        section.item_count,
+                        section.skipped_out_of_range_item_count,
+                        section.skipped_existing_post_count,
+                        section.skipped_duplicate_post_count,
+                        section.skipped_unavailable_post_count,
+                        section.skipped_existing_asset_count,
+                        section.queued_asset_count,
+                    );
+                    log_runtime_event(
+                        layout,
+                        "sync.highlights.diagnostic",
+                        "debug",
+                        RuntimeLogAnchor {
+                            account_id: Some(&context.account.id),
+                            provider: Some(&context.source.provider),
+                            source_id: Some(&context.source.id),
+                            source_handle: Some(&context.source.handle),
+                        },
+                        message,
+                        None,
+                    );
+                }
+            }
+
+            // Snapshot append-only da participação de posts em álbuns de highlight.
+            // Cobre os itens "já existentes" (pulados no download) para que a
+            // galeria os mostre sob o destaque sem rebaixar bytes.
+            upsert_instagram_highlight_memberships(
+                connection,
+                &context.source.id,
+                &result.highlight_memberships,
+                &finished_at,
+            )?;
+
+            if let Some(resolved_username) = result.resolved_username.as_deref() {
+                let resolved_handle = sanitize_source_handle("instagram", resolved_username);
+                if !resolved_handle.is_empty()
+                    && !source_handle.eq_ignore_ascii_case(&resolved_handle)
+                {
+                    if force_update_user_name {
+                        match update_instagram_source_handle_after_sync(
+                            connection,
+                            &context.source.id,
+                            &resolved_handle,
+                            &finished_at,
+                        ) {
+                            Ok(()) => {
+                                let message = format!(
+                                    "Instagram username changed from '{}' to '{}'. Source handle updated automatically.",
+                                    context.source.handle, resolved_handle
+                                );
+                                log_runtime_event(
+                                    layout,
+                                    "sync.profile",
+                                    "info",
+                                    RuntimeLogAnchor {
+                                        account_id: Some(&context.account.id),
+                                        provider: Some(&context.source.provider),
+                                        source_id: Some(&context.source.id),
+                                        source_handle: Some(&context.source.handle),
+                                    },
+                                    message,
+                                    None,
+                                );
+                                handle_change_suffix = format!(
+                                    " Username changed from '{}' to '{}'.",
+                                    context.source.handle, resolved_handle
+                                );
+                                source_handle = resolved_handle;
+                            }
+                            Err(error) => {
+                                let message = format!(
+                                    "Instagram username change detected ({} -> {}), but source handle update failed: {}",
+                                    context.source.handle, resolved_handle, error
+                                );
+                                log_runtime_event(
+                                    layout,
+                                    "sync.profile",
+                                    "warning",
+                                    RuntimeLogAnchor {
+                                        account_id: Some(&context.account.id),
+                                        provider: Some(&context.source.provider),
+                                        source_id: Some(&context.source.id),
+                                        source_handle: Some(&context.source.handle),
+                                    },
+                                    message,
+                                    Some(error),
+                                );
+                            }
+                        }
+                    } else {
+                        let message = format!(
+                            "Instagram username change detected ({} -> {}), but source auto-update is disabled.",
+                            context.source.handle, resolved_handle
+                        );
+                        log_runtime_event(
+                            layout,
+                            "sync.profile",
+                            "info",
+                            RuntimeLogAnchor {
+                                account_id: Some(&context.account.id),
+                                provider: Some(&context.source.provider),
+                                source_id: Some(&context.source.id),
+                                source_handle: Some(&context.source.handle),
+                            },
+                            message,
+                            None,
+                        );
+                        handle_change_suffix = format!(
+                            " Username changed from '{}' to '{}' (auto-update disabled).",
+                            context.source.handle, resolved_handle
+                        );
+                    }
+                }
+            }
+
+            if let Some(profile_description) = result.profile_description.as_deref() {
+                match update_instagram_source_description_after_sync(
+                    connection,
+                    &context.source,
+                    profile_description,
+                    force_update_user_information,
+                    &finished_at,
+                ) {
+                    Ok(true) => {
+                        description_update_suffix = if force_update_user_information {
+                            " Profile note updated from Instagram biography.".to_string()
+                        } else {
+                            " Profile note populated from Instagram biography.".to_string()
+                        };
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        log_runtime_event(
+                            layout,
+                            "sync.profile",
+                            "warning",
+                            RuntimeLogAnchor {
+                                account_id: Some(&context.account.id),
+                                provider: Some(&context.source.provider),
+                                source_id: Some(&context.source.id),
+                                source_handle: Some(&context.source.handle),
+                            },
+                            format!(
+                                "Failed to persist Instagram biography for '{}': {}",
+                                context.source.handle, error
+                            ),
+                            Some(error),
+                        );
+                    }
+                }
+            }
+
+            source_sync_runtime::report_source_sync_progress(
+                &context.source.id,
+                Some(100),
+                Some("Committing results".to_string()),
+                Some("Persisting Instagram sync history plus post and media ledgers.".to_string()),
+                true,
+                Some(result.downloaded_media.len() as u32),
+            );
+
+            let ingested_media_count = catalog_instagram_downloads(
+                connection,
+                &context.account.id,
+                Some(&context.source.id),
+                &source_handle,
+                &finished_at,
+                &result.downloaded_media,
+            )?;
+            upsert_instagram_media_ledger_entries(
+                connection,
+                &context.source.id,
+                &context.account.id,
+                &source_handle,
+                &request.profile_root,
+                &result.downloaded_media,
+                &finished_at,
+            )?;
+            upsert_instagram_media_alias_entries(
+                connection,
+                &context.source.id,
+                &context.account.id,
+                &request.profile_root,
+                &result.downloaded_media,
+                &finished_at,
+            )?;
+            upsert_instagram_media_fingerprint_entries(
+                connection,
+                &context.source.id,
+                &context.account.id,
+                &request.profile_root,
+                &result.downloaded_media,
+                &finished_at,
+            )?;
+            upsert_instagram_media_naming_ledger_entries(
+                connection,
+                &context.source.id,
+                &context.account.id,
+                &source_handle,
+                &request.profile_root,
+                &result.downloaded_media,
+                &finished_at,
+            )?;
+            upsert_instagram_post_ledger_entries(
+                connection,
+                &context.source.id,
+                &context.account.id,
+                &source_handle,
+                &result.observed_posts,
+                &finished_at,
+            )?;
+            let mut script_suffix = String::new();
+            if let Some(script_pattern) = instagram_profile_script_pattern(&source_options) {
+                if ingested_media_count > 0 {
+                    if let Err(error) =
+                        run_profile_post_sync_script(&script_pattern, &request.profile_root)
+                    {
+                        log_runtime_event(
+                            layout,
+                            "sync.script",
+                            "warning",
+                            RuntimeLogAnchor {
+                                account_id: Some(&context.account.id),
+                                provider: Some(&context.source.provider),
+                                source_id: Some(&context.source.id),
+                                source_handle: Some(&context.source.handle),
+                            },
+                            format!(
+                                "Profile post-sync script failed for '{}': {}",
+                                context.source.handle, error
+                            ),
+                            Some(error),
+                        );
+                        script_suffix =
+                            " Post-sync script execution failed (see runtime log).".to_string();
+                    }
+                }
+            }
+
+            if !context.source.profile_image_custom {
+                let provider_avatar = match refresh_profile_picture_from_provider(
+                    connection,
+                    layout,
+                    context,
+                    &request.profile_root,
+                    settings,
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        let message = match error.level {
+                            ProfilePictureRefreshLogLevel::Info => format!(
+                                "Profile picture refresh skipped for '{}': {}",
+                                context.source.handle, error.message
+                            ),
+                            ProfilePictureRefreshLogLevel::Warning => format!(
+                                "Failed to refresh profile picture for '{}': {}",
+                                context.source.handle, error.message
+                            ),
+                        };
+                        log_runtime_event(
+                            layout,
+                            "sync.avatar",
+                            error.level.as_str(),
+                            RuntimeLogAnchor {
+                                account_id: Some(&context.account.id),
+                                provider: Some(&context.source.provider),
+                                source_id: Some(&context.source.id),
+                                source_handle: Some(&context.source.handle),
+                            },
+                            message,
+                            error.detail,
+                        );
+                        None
+                    }
+                };
+
+                let resolved_avatar =
+                    provider_avatar.or_else(|| find_source_avatar(&request.profile_root));
+                if let Some(avatar_path) = resolved_avatar {
+                    let _ = update_source_profile_image(
+                        connection,
+                        &context.source.id,
+                        &avatar_path,
+                        &finished_at,
+                    );
+                }
+            }
+
+            if result.validation_error.is_some() && !result.auth_disabled_sections.is_empty() {
+                disable_instagram_sections_after_auth_failure(
+                    connection,
+                    &context.account.id,
+                    &result.auth_disabled_sections,
+                    &finished_at,
+                )?;
+            }
+
+            if result.rate_limited {
+                let cooldown_until = set_instagram_sync_cooldown(
+                    connection,
+                    &context.account.id,
+                    Duration::seconds(INSTAGRAM_SYNC_RETRY_AFTER_FALLBACK_SECS),
+                    &finished_at,
+                )?;
+                cooldown_suffix = format!(
+                    " Provider cooldown active until {} after Instagram rate limiting.",
+                    cooldown_until.to_rfc3339()
+                );
+            } else {
+                clear_instagram_sync_cooldown(connection, &context.account.id)?;
+            }
+
+            let auth_invalid = result.validation_error.is_some();
+            let manifest_summary_json = result
+                .manifest_summary
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            let summary = if result.section_errors.is_empty() {
+                if auth_invalid {
+                    format!(
+                            "Instagram sync failed: credentials appear invalid. Downloaded {} media items before failure.",
+                            ingested_media_count
+                        )
+                } else {
+                    format_download_success_summary(
+                        "Instagram sync succeeded.",
+                        ingested_media_count,
+                    )
+                }
+            } else {
+                format!(
+                    "Instagram sync completed with warnings. Downloaded {} media items. {}",
+                    ingested_media_count,
+                    result.section_errors.join(" | ")
+                )
+            };
+            let manifest_suffix = format_instagram_manifest_suffix(
+                result.manifest_summary.as_ref(),
+                auth_invalid || !result.section_errors.is_empty() || ingested_media_count > 0,
+            );
+            SourceSyncOutcome {
+                tool: "internal.instagram".to_string(),
+                status: if auth_invalid {
+                    "failed".to_string()
+                } else {
+                    "succeeded".to_string()
+                },
+                summary: format!(
+                    "{summary}{manifest_suffix}{handle_change_suffix}{description_update_suffix}{script_suffix}{cooldown_suffix}"
+                ),
+                command_preview: format!(
+                    "internal.instagram profile {} -> {}",
+                    source_handle,
+                    request.profile_root.display()
+                ),
+                manifest_summary_json,
+                degraded_capabilities: Vec::new(),
+                validation_error: result.validation_error,
+            }
+        }
+        Err(error) => {
+            let cancelled_by_user = error
+                .trim()
+                .to_ascii_lowercase()
+                .contains("cancelled by user");
+            let mut summary = if cancelled_by_user {
+                "Instagram sync cancelled by user.".to_string()
+            } else {
+                format!("Instagram sync failed: {}", error)
+            };
+            if instagram_error_indicates_rate_limit(&error) {
+                let cooldown_until = set_instagram_sync_cooldown(
+                    connection,
+                    &context.account.id,
+                    Duration::seconds(INSTAGRAM_SYNC_RETRY_AFTER_FALLBACK_SECS),
+                    &finished_at,
+                )?;
+                summary.push_str(&format!(
+                    " Provider cooldown active until {} after Instagram rate limiting.",
+                    cooldown_until.to_rfc3339()
+                ));
+            } else if !cancelled_by_user {
+                clear_instagram_sync_cooldown(connection, &context.account.id)?;
+            }
+            SourceSyncOutcome {
+                tool: "internal.instagram".to_string(),
+                status: "failed".to_string(),
+                summary,
+                command_preview: format!(
+                    "internal.instagram profile {} -> {}",
+                    context.source.handle,
+                    request.profile_root.display()
+                ),
+                manifest_summary_json: None,
+                degraded_capabilities: Vec::new(),
+                validation_error: if cancelled_by_user { None } else { Some(error) },
+            }
+        }
+    };
+
+    if outcome.status == "succeeded" {
+        if let Err(error) = clear_source_sync_problem(connection, &context.source.id, &finished_at)
+        {
+            log_runtime_event(
+                layout,
+                "sync.profile",
+                "warning",
+                RuntimeLogAnchor {
+                    account_id: Some(&context.account.id),
+                    provider: Some(&context.source.provider),
+                    source_id: Some(&context.source.id),
+                    source_handle: Some(&context.source.handle),
+                },
+                format!(
+                    "Instagram sync succeeded, but failed to clear source sync problem marker: {}",
+                    error
+                ),
+                Some(error),
+            );
+        }
+    }
+
+    persist_source_sync_run(
+        connection,
+        context,
+        &outcome,
+        trigger,
+        &started_at,
+        &finished_at,
+    )?;
+    propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+
+    source_sync_runtime::report_source_sync_progress(
+        &context.source.id,
+        Some(if outcome.status == "succeeded" {
+            100
+        } else {
+            0
+        }),
+        Some(match outcome.status.as_str() {
+            "succeeded" => "Download finished".to_string(),
+            "skipped" => "Download skipped".to_string(),
+            _ => "Download failed".to_string(),
+        }),
+        Some(outcome.summary.clone()),
+        false,
+        None,
+    );
+
+    Ok(outcome)
+}
+pub(super) fn execute_instagram_saved_posts_sync_with_connection(
+    connection: &Connection,
+    layout: &StorageLayout,
+    account_id: String,
+    trigger: &str,
+) -> Result<AccountSyncOutcome, String> {
+    let context = load_account_sync_context(connection, layout, &account_id)?;
+    if !context.account.provider.eq_ignore_ascii_case("instagram") {
+        return Err(format!(
+            "Provider account '{}' does not belong to Instagram.",
+            account_id
+        ));
+    }
+
+    let request = build_instagram_saved_posts_request(layout, &context)?;
+    let started_at = now_timestamp();
+    let execution = instagram_connector::run_saved_posts_sync(&request, |_| {}, || false);
+    let finished_at = now_timestamp();
+
+    let outcome = match execution {
+        Ok(result) => {
+            let ingested_media_count = catalog_instagram_downloads(
+                connection,
+                &context.account.id,
+                None,
+                &context.account.display_name,
+                &finished_at,
+                &result.downloaded_media,
+            )?;
+            AccountSyncOutcome {
+                tool: "internal.instagram".to_string(),
+                status: "succeeded".to_string(),
+                summary: if result.section_errors.is_empty() {
+                    format_download_success_summary(
+                        "Saved posts sync succeeded.",
+                        ingested_media_count,
+                    )
+                } else {
+                    format!(
+                        "Saved posts sync completed with warnings. Downloaded {} media items. {}",
+                        ingested_media_count,
+                        result.section_errors.join(" | ")
+                    )
+                },
+                command_preview: format!(
+                    "internal.instagram saved_posts {} -> {}",
+                    context.account.display_name,
+                    request.saved_posts_root.display()
+                ),
+            }
+        }
+        Err(error) => AccountSyncOutcome {
+            tool: "internal.instagram".to_string(),
+            status: "failed".to_string(),
+            summary: format!("Saved posts sync failed: {}", error),
+            command_preview: format!(
+                "internal.instagram saved_posts {} -> {}",
+                context.account.display_name,
+                request.saved_posts_root.display()
+            ),
+        },
+    };
+
+    persist_account_sync_run(
+        connection,
+        &context.account,
+        "saved_posts",
+        &outcome,
+        trigger,
+        &started_at,
+        &finished_at,
+    )?;
+
+    Ok(outcome)
+}
+pub(super) fn build_instagram_profile_sync_request(
+    connection: &Connection,
+    context: &SourceSyncContext,
+    layout: &StorageLayout,
+    settings: &HashMap<String, String>,
+    run_mode: Option<&str>,
+    sync_options_override: Option<&SourceSyncOptions>,
+) -> Result<instagram_connector::InstagramConnectorRequest, String> {
+    let parsed_session = parse_session_payload(&context.session_payload)?;
+    let cookies = parsed_session.cookies;
+    let metadata = parsed_session.metadata;
+    let source_options =
+        source_instagram_sync_options_with_override(&context.source, sync_options_override);
+    let profile_root = resolve_instagram_profile_root_with_options(
+        layout,
+        &context.source,
+        Some(settings),
+        Some(&source_options),
+    );
+    let saved_posts_root = resolve_instagram_saved_posts_root(layout, Some(settings));
+    let existing_media_keys =
+        load_existing_instagram_media_identity_keys_for_source(layout, &context.source, settings)?;
+    let existing_relative_paths =
+        load_existing_instagram_relative_media_paths_for_source(layout, &context.source, settings)?;
+    let media_ledger_snapshot =
+        load_instagram_media_ledger_snapshot_for_source(connection, &context.source.id)?;
+    let media_alias_snapshot =
+        load_instagram_media_alias_snapshot_for_source(connection, &context.source.id)?;
+    let post_ledger_snapshot =
+        load_instagram_post_ledger_snapshot_for_source(connection, &context.source.id)?;
+    let username = instagram_username_override(&source_options)
+        .map(|value| {
+            sanitize_source_handle("instagram", value)
+                .trim_start_matches('@')
+                .to_string()
+        })
+        .unwrap_or_else(|| {
+            sanitize_source_handle("instagram", &context.source.handle)
+                .trim_start_matches('@')
+                .to_string()
+        });
+    if username.is_empty() {
+        return Err("Instagram source handle is empty.".to_string());
+    }
+    let extract_from_video = source_options
+        .extract_image_from_video
+        .clone()
+        .unwrap_or_default();
+    let verified_profile = source_options.verified_profile.unwrap_or(true);
+    let media_file_naming_mode = parse_instagram_media_file_naming_mode(settings);
+    let media_file_naming_template = parse_instagram_media_file_naming_template(settings);
+    let mut ledger_media_keys = media_ledger_snapshot.media_keys;
+    ledger_media_keys.extend(media_alias_snapshot.keys);
+    let explicit_date_from_timestamp = instagram_date_from_timestamp(&source_options);
+    let deleted_post_keys =
+        load_instagram_deleted_post_keys(connection, &context.source.id).unwrap_or_default();
+
+    Ok(instagram_connector::InstagramConnectorRequest {
+        username,
+        cookies: cookies
+            .iter()
+            .map(|cookie| instagram_connector::SessionCookie {
+                domain: cookie.domain.clone(),
+                name: cookie.name.clone(),
+                value: cookie.value.clone(),
+            })
+            .collect(),
+        headers: build_instagram_auth_headers(settings, &cookies, Some(&metadata)),
+        profile_root,
+        saved_posts_root,
+        ledger_post_keys: post_ledger_snapshot.keys,
+        deleted_post_keys,
+        existing_media_keys,
+        ledger_media_keys,
+        existing_relative_paths,
+        ledger_relative_paths: media_ledger_snapshot.relative_paths,
+        sections: build_instagram_section_selection(
+            &context.source,
+            settings,
+            sync_options_override,
+        ),
+        use_gql: parse_instagram_use_gql_setting(settings),
+        download_saved_posts: parse_bool_setting(
+            settings
+                .get("instagram.account.downloadSavedPosts")
+                .map(String::as_str),
+            false,
+        ),
+        post_page_size: parse_instagram_post_page_size(settings, verified_profile),
+        skip_errors: parse_bool_setting(
+            settings
+                .get("instagram.errors.skipErrors")
+                .map(String::as_str),
+            true,
+        ),
+        skip_errors_exclude: instagram_error_policy_settings(settings).0,
+        log_skipped_errors: instagram_error_policy_settings(settings).1,
+        tagged_notify_limit: instagram_error_policy_settings(settings).2,
+        ignore_stories_560_errors: parse_bool_setting(
+            settings
+                .get("instagram.errors.ignoreStories560")
+                .map(String::as_str),
+            false,
+        ),
+        pacing: instagram_request_pacing(settings),
+        timeout_secs: 45,
+        download_images: source_options.download_images.unwrap_or(true),
+        download_videos: source_options.download_videos.unwrap_or(true),
+        extract_image_from_video: instagram_connector::InstagramSectionSelection {
+            timeline: extract_from_video.timeline,
+            reels: extract_from_video.reels,
+            stories: extract_from_video.stories,
+            stories_user: extract_from_video.stories_user,
+            tagged: extract_from_video.tagged,
+        },
+        place_extracted_image_into_video_folder: source_options
+            .place_extracted_image_into_video_folder
+            .unwrap_or(false),
+        download_text: source_options.download_text.unwrap_or(false),
+        download_text_posts: source_options.download_text_posts.unwrap_or(false),
+        text_special_folder: source_options.text_special_folder.unwrap_or(true),
+        get_user_media_only: source_options.get_user_media_only.unwrap_or(false),
+        missing_only: instagram_missing_only_enabled(&source_options),
+        date_from_timestamp: explicit_date_from_timestamp
+            .or_else(|| implicit_instagram_imported_cutoff_timestamp(&context.source, run_mode)),
+        date_to_timestamp: instagram_date_to_timestamp(&source_options),
+        media_file_naming_mode,
+        media_file_naming_template,
+        target_story_media_id: source_options.target_story_media_id.clone(),
+    })
+}
+pub(super) fn build_instagram_section_selection(
+    source: &SourceProfile,
+    settings: &HashMap<String, String>,
+    sync_options_override: Option<&SourceSyncOptions>,
+) -> instagram_connector::InstagramSectionSelection {
+    let options = source_instagram_sync_options_with_override(source, sync_options_override);
+    instagram_connector::InstagramSectionSelection {
+        timeline: parse_bool_setting(
+            settings
+                .get("instagram.download.timeline")
+                .map(String::as_str),
+            true,
+        ) && options.timeline,
+        reels: parse_bool_setting(
+            settings.get("instagram.download.reels").map(String::as_str),
+            false,
+        ) && options.reels,
+        stories: parse_bool_setting(
+            settings
+                .get("instagram.download.stories")
+                .map(String::as_str),
+            true,
+        ) && options.stories,
+        stories_user: parse_bool_setting(
+            settings
+                .get("instagram.download.storiesUser")
+                .map(String::as_str),
+            true,
+        ) && options.stories_user,
+        tagged: parse_bool_setting(
+            settings
+                .get("instagram.download.taggedPosts")
+                .map(String::as_str),
+            false,
+        ) && options.tagged,
+    }
+}
+pub(super) fn run_profile_post_sync_script(
+    script_pattern: &str,
+    profile_root: &Path,
+) -> Result<(), String> {
+    let profile_root_value = profile_root.to_string_lossy();
+    let escaped_profile_root = profile_root_value.replace('"', "\\\"");
+    let command_line = if script_pattern.contains("{0}") {
+        script_pattern.replace("{0}", &escaped_profile_root)
+    } else {
+        format!(r#"{} "{}""#, script_pattern, escaped_profile_root)
+    };
+
+    let mut command = Command::new("cmd");
+    configure_background_command(&mut command);
+    let status = command
+        .arg("/C")
+        .arg(&command_line)
+        .status()
+        .map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Script exited with status {:?}: {}",
+            status.code(),
+            command_line
+        ))
+    }
+}
+pub(super) fn load_source_sync_context(
+    connection: &Connection,
+    layout: &StorageLayout,
+    source_id: &str,
+) -> Result<SourceSyncContext, String> {
+    let source = connection
+        .query_row(
+            "SELECT id, provider, source_kind, handle, display_name, account_id, labels_json, ready_for_download, sync_options_json, profile_image_path, profile_image_custom, remote_state, is_subscription, last_synced_at, sync_problem_code, sync_problem_message, sync_problem_at, created_at, group_id, importer_id, imported_at
+             FROM source_profiles
+             WHERE id = ?1
+               AND deleted_at IS NULL
+             LIMIT 1",
+            params![source_id],
+            |row| {
+                let provider: String = row.get(1)?;
+                Ok(SourceProfile {
+                    id: row.get(0)?,
+                    provider: provider.clone(),
+                    source_kind: row.get(2)?,
+                    handle: row.get(3)?,
+                    display_name: row.get(4)?,
+                    account_id: row.get(5)?,
+                    group_id: row.get(18)?,
+                    labels: from_json_array(row.get::<_, String>(6)?),
+                    ready_for_download: row.get::<_, i64>(7)? != 0,
+                    sync_options: deserialize_source_sync_options(
+                        &provider,
+                        &row.get::<_, String>(8)?,
+                    ),
+                    profile_image_path: row.get(9)?,
+                    profile_image_custom: row.get::<_, i64>(10).unwrap_or(0) != 0,
+                    remote_state: row.get::<_, String>(11).unwrap_or_else(|_| "exists".to_string()),
+                    is_subscription: row.get::<_, i64>(12).unwrap_or(0) != 0,
+                    last_synced_at: row.get(13).ok(),
+                    sync_problem_code: row.get(14).ok(),
+                    sync_problem_message: row.get(15).ok(),
+                    sync_problem_at: row.get(16).ok(),
+                    created_at: row.get(17).ok(),
+                    importer_id: row.get(19).ok(),
+                    imported_at: row.get(20).ok(),
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Source '{}' does not exist.", source_id))?;
+
+    let account_id = source.account_id.clone().ok_or_else(|| {
+        format!(
+            "Source '{}' is missing a bound provider account.",
+            source.handle
+        )
+    })?;
+
+    let account = connection
+        .query_row(
+            "SELECT id, provider, display_name, auth_mode, auth_state, capabilities_json, last_validated_at
+             FROM provider_accounts
+             WHERE id = ?1
+             LIMIT 1",
+            params![&account_id],
+            |row| {
+                Ok(ProviderAccount {
+                    id: row.get(0)?,
+                    provider: row.get(1)?,
+                    display_name: row.get(2)?,
+                    auth_mode: row.get(3)?,
+                    auth_state: row.get(4)?,
+                    capabilities: from_json_array(row.get::<_, String>(5)?),
+                    last_validated_at: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("Provider account '{}' does not exist.", account_id))?;
+
+    let session = load_account_session_record(connection, &account_id)?
+        .ok_or_else(|| format!("Provider account '{}' has no stored session.", account_id))?;
+    let session_payload = session_secret_store::load_secret(layout, &session.secret_ref)?;
+
+    Ok(SourceSyncContext {
+        source,
+        account,
+        session_payload,
+    })
+}
+pub(super) fn build_source_sync_invocation(
+    connection: &Connection,
+    context: &SourceSyncContext,
+    layout: &StorageLayout,
+    _sync_options_override: Option<&SourceSyncOptions>,
+) -> Result<ToolInvocation, String> {
+    let cookies = parse_session_cookies(&context.session_payload)?;
+    let cookie_file_path = layout
+        .cache_root
+        .join(format!("source-sync-{}.cookies.txt", context.source.id));
+    write_netscape_cookie_file(&cookie_file_path, &cookies)?;
+    let output_root =
+        resolved_source_media_output_root_with_connection(connection, layout, &context.source)?;
+    fs::create_dir_all(&output_root).map_err(|error| error.to_string())?;
+
+    let sanitized_handle = sanitize_source_handle(&context.source.provider, &context.source.handle);
+    let target_url = source_target_url(&context.source.provider, &sanitized_handle);
+
+    let runtime = providers::source_sync_runtime(&context.source.provider).ok_or_else(|| {
+        format!(
+            "Provider '{}' does not have a connector runtime implementation.",
+            context.source.provider
+        )
+    })?;
+
+    let connector_key = runtime
+        .tool_setting_key
+        .trim()
+        .trim_start_matches("tool.")
+        .trim_end_matches(".path")
+        .to_string();
+    let executable =
+        connector_runtime::resolve_connector_executable(connection, layout, &connector_key)?;
+
+    let output_root_value = output_root.display().to_string();
+    let args = match runtime.argument_mode {
+        providers::SourceSyncArgumentMode::YtDlpDirectory => vec![
+            "--cookies".to_string(),
+            cookie_file_path.display().to_string(),
+            "-P".to_string(),
+            output_root_value.clone(),
+            target_url.clone(),
+        ],
+        providers::SourceSyncArgumentMode::GalleryDlDirectory => vec![
+            "-d".to_string(),
+            output_root_value.clone(),
+            "--cookies".to_string(),
+            cookie_file_path.display().to_string(),
+            target_url.clone(),
+        ],
+    };
+
+    let command_preview = format!(
+        "{} {}",
+        runtime.default_executable,
+        args.iter()
+            .map(|argument| {
+                if argument == &cookie_file_path.display().to_string() {
+                    "<session-cookie-file>".to_string()
+                } else {
+                    argument.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+
+    Ok(ToolInvocation {
+        source_id: context.source.id.clone(),
+        handle: context.source.handle.clone(),
+        connector_key,
+        executable,
+        args,
+        command_preview,
+        working_directory: Some(layout.cache_root.clone()),
+        output_root,
+        cancel_token: register_source_sync_cancel_token(&context.source.id),
+    })
+}
+pub(super) fn persist_source_sync_run(
+    connection: &Connection,
+    context: &SourceSyncContext,
+    outcome: &SourceSyncOutcome,
+    trigger: &str,
+    started_at: &str,
+    finished_at: &str,
+) -> Result<(), String> {
+    let event_type = if outcome.status == "failed" {
+        "error"
+    } else {
+        "response"
+    };
+    let mut raw = format!(
+        "status={}\nstarted_at={started_at}\nfinished_at={finished_at}\ncommand={}\nsummary={}",
+        outcome.status, outcome.command_preview, outcome.summary
+    );
+    if let Some(error) = outcome.validation_error.as_deref() {
+        raw.push_str("\nerror=");
+        raw.push_str(error);
+    }
+    if let Some(manifest) = outcome.manifest_summary_json.as_deref() {
+        raw.push_str("\nmanifest=");
+        raw.push_str(manifest);
+    }
+    connector_debug::append_current(&outcome.tool, event_type, "sync.result", raw);
+
+    connection
+        .execute(
+            "INSERT INTO source_sync_runs (
+                id,
+                source_id,
+                account_id,
+                provider,
+                tool,
+                trigger,
+                status,
+                summary,
+                command_preview,
+                manifest_summary_json,
+                degraded_capabilities_json,
+                started_at,
+                finished_at,
+                created_at
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+            params![
+                new_id(),
+                &context.source.id,
+                &context.account.id,
+                &context.source.provider,
+                &outcome.tool,
+                trigger,
+                &outcome.status,
+                &outcome.summary,
+                &outcome.command_preview,
+                &outcome.manifest_summary_json,
+                to_json_array(&outcome.degraded_capabilities)?,
+                started_at,
+                finished_at
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    connection
+        .execute(
+            "UPDATE source_profiles
+             SET last_synced_at = ?2,
+                 updated_at = ?2
+             WHERE id = ?1",
+            params![&context.source.id, finished_at],
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+pub(super) fn persist_account_sync_run(
+    connection: &Connection,
+    account: &ProviderAccount,
+    sync_scope: &str,
+    outcome: &AccountSyncOutcome,
+    trigger: &str,
+    started_at: &str,
+    finished_at: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO account_sync_runs (
+                id,
+                account_id,
+                provider,
+                sync_scope,
+                tool,
+                trigger,
+                status,
+                summary,
+                command_preview,
+                started_at,
+                finished_at,
+                created_at
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+            params![
+                new_id(),
+                &account.id,
+                &account.provider,
+                sync_scope,
+                &outcome.tool,
+                trigger,
+                &outcome.status,
+                &outcome.summary,
+                &outcome.command_preview,
+                started_at,
+                finished_at
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+pub(super) fn propagate_source_sync_account_health(
+    connection: &Connection,
+    context: &SourceSyncContext,
+    outcome: &SourceSyncOutcome,
+    finished_at: &str,
+) -> Result<(), String> {
+    let auth_state = if outcome.validation_error.is_none() {
+        "ready"
+    } else {
+        "degraded"
+    };
+
+    connection
+        .execute(
+            "UPDATE provider_account_sessions
+             SET last_validated_at = ?2,
+                 last_validation_error = ?3,
+                 updated_at = ?2
+             WHERE account_id = ?1",
+            params![
+                &context.account.id,
+                finished_at,
+                outcome.validation_error.clone()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+
+    connection
+        .execute(
+            "UPDATE provider_accounts
+             SET auth_state = ?2,
+                 last_validated_at = ?3,
+                 updated_at = ?3
+             WHERE id = ?1",
+            params![&context.account.id, auth_state, finished_at],
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+pub(super) fn ensure_instagram_sync_post_ledger_table(
+    connection: &Connection,
+) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS instagram_sync_post_ledger (
+                source_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                source_handle TEXT NOT NULL,
+                provider_post_key TEXT NOT NULL,
+                provider_post_code TEXT NOT NULL DEFAULT '',
+                media_section TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (source_id, provider_post_key),
+                FOREIGN KEY (source_id) REFERENCES source_profiles(id) ON DELETE CASCADE,
+                FOREIGN KEY (account_id) REFERENCES provider_accounts(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_instagram_sync_post_ledger_account_key
+                ON instagram_sync_post_ledger(account_id, provider_post_key);
+
+            CREATE INDEX IF NOT EXISTS idx_instagram_sync_post_ledger_source_code
+                ON instagram_sync_post_ledger(source_id, provider_post_code);",
+        )
+        .map_err(|error| error.to_string())
+}
+pub(super) fn load_source_sync_runs(connection: &Connection) -> Result<Vec<SourceSyncRun>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT
+                id,
+                source_id,
+                account_id,
+                provider,
+                tool,
+                trigger,
+                status,
+                summary,
+                command_preview,
+                manifest_summary_json,
+                degraded_capabilities_json,
+                started_at,
+                finished_at
+             FROM source_sync_runs
+             ORDER BY finished_at DESC, created_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(SourceSyncRun {
+                id: row.get(0)?,
+                source_id: row.get(1)?,
+                account_id: row.get(2)?,
+                provider: row.get(3)?,
+                tool: row.get(4)?,
+                trigger: row.get(5)?,
+                status: row.get(6)?,
+                summary: row.get(7)?,
+                command_preview: row.get(8)?,
+                manifest_summary_json: row.get(9)?,
+                degraded_capabilities: from_json_array(row.get::<_, String>(10)?),
+                started_at: row.get(11)?,
+                finished_at: row.get(12)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+pub(super) fn load_account_sync_runs(
+    connection: &Connection,
+) -> Result<Vec<AccountSyncRun>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT
+                id,
+                account_id,
+                provider,
+                sync_scope,
+                tool,
+                trigger,
+                status,
+                summary,
+                command_preview,
+                started_at,
+                finished_at
+             FROM account_sync_runs
+             ORDER BY finished_at DESC, created_at DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(AccountSyncRun {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                provider: row.get(2)?,
+                sync_scope: row.get(3)?,
+                tool: row.get(4)?,
+                trigger: row.get(5)?,
+                status: row.get(6)?,
+                summary: row.get(7)?,
+                command_preview: row.get(8)?,
+                started_at: row.get(9)?,
+                finished_at: row.get(10)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}

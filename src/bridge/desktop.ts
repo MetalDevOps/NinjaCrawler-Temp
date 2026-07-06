@@ -876,14 +876,12 @@ function normalizeSchedulerPlanCriteria(value: unknown, targetFilter = ''): Sche
     sitesExcluded: stringArray(pick(record, 'sitesExcluded', 'sites_excluded')).map((entry) => normalizeProviderKey(entry)),
     groupIdsIncluded: stringArray(pick(record, 'groupIdsIncluded', 'group_ids_included')),
     groupIdsExcluded: stringArray(pick(record, 'groupIdsExcluded', 'group_ids_excluded')),
-    groupsOnly: booleanValue(record, ['groupsOnly', 'groups_only'], false),
     usersCount: optionalNumberValue(record, ['usersCount', 'users_count']),
     daysNumber: optionalNumberValue(record, ['daysNumber', 'days_number']),
     daysIsDownloaded: booleanValue(record, ['daysIsDownloaded', 'days_is_downloaded'], false),
     dateFrom: optionalStringValue(record, ['dateFrom', 'date_from']),
     dateTo: optionalStringValue(record, ['dateTo', 'date_to']),
     dateInRange: booleanValue(record, ['dateInRange', 'date_in_range'], true),
-    dateMode: optionalStringValue(record, ['dateMode', 'date_mode']) as SchedulerPlanCriteria['dateMode'],
     advancedExpression: optionalStringValue(record, ['advancedExpression', 'advanced_expression']) ?? targetFilter,
   }
 }

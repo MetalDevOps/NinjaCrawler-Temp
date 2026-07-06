@@ -71,38 +71,33 @@ fn emit_appended(entry: &RuntimeLogEntry) {
     }
 }
 
+/// Identificadores opcionais que ancoram uma entrada de log à conta e ao
+/// perfil de origem. Agrupados num struct para não carregar quatro
+/// `Option<&str>` posicionais (e trocáveis) em toda assinatura de log.
+#[derive(Clone, Copy, Default)]
+pub struct RuntimeLogAnchor<'a> {
+    pub account_id: Option<&'a str>,
+    pub provider: Option<&'a str>,
+    pub source_id: Option<&'a str>,
+    pub source_handle: Option<&'a str>,
+}
+
 pub fn append_workspace(
     scope: &str,
     level: &str,
-    account_id: Option<&str>,
-    provider: Option<&str>,
-    source_id: Option<&str>,
-    source_handle: Option<&str>,
+    context: RuntimeLogAnchor<'_>,
     message: impl Into<String>,
     detail: Option<String>,
 ) -> Result<RuntimeLogEntry, String> {
     let layout = storage::ensure_workspace_layout().map_err(|error| error.to_string())?;
-    append(
-        &layout,
-        scope,
-        level,
-        account_id,
-        provider,
-        source_id,
-        source_handle,
-        message,
-        detail,
-    )
+    append(&layout, scope, level, context, message, detail)
 }
 
 pub fn append(
     layout: &StorageLayout,
     scope: &str,
     level: &str,
-    account_id: Option<&str>,
-    provider: Option<&str>,
-    source_id: Option<&str>,
-    source_handle: Option<&str>,
+    context: RuntimeLogAnchor<'_>,
     message: impl Into<String>,
     detail: Option<String>,
 ) -> Result<RuntimeLogEntry, String> {
@@ -113,10 +108,10 @@ pub fn append(
         timestamp: Utc::now().to_rfc3339(),
         scope: scope.to_string(),
         level: level.to_string(),
-        account_id: account_id.map(str::to_string),
-        provider: provider.map(str::to_string),
-        source_id: source_id.map(str::to_string),
-        source_handle: source_handle.map(str::to_string),
+        account_id: context.account_id.map(str::to_string),
+        provider: context.provider.map(str::to_string),
+        source_id: context.source_id.map(str::to_string),
+        source_handle: context.source_handle.map(str::to_string),
         message: message.into(),
         detail,
     };
@@ -260,10 +255,7 @@ mod tests {
                 &layout,
                 "runtime.test",
                 "info",
-                None,
-                None,
-                None,
-                None,
+                RuntimeLogAnchor::default(),
                 format!("entry-{index}"),
                 None,
             )

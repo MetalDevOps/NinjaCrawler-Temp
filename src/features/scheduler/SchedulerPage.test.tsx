@@ -58,14 +58,12 @@ function createSnapshot() {
           sitesExcluded: [],
           groupIdsIncluded: [],
           groupIdsExcluded: [],
-          groupsOnly: false,
           usersCount: undefined,
           daysNumber: undefined,
           daysIsDownloaded: false,
           dateFrom: undefined,
           dateTo: undefined,
           dateInRange: true,
-          dateMode: undefined,
           advancedExpression: '',
         },
       },
@@ -112,14 +110,12 @@ function createSnapshot() {
               sitesExcluded: [],
               groupIdsIncluded: [],
               groupIdsExcluded: [],
-              groupsOnly: false,
               usersCount: undefined,
               daysNumber: undefined,
               daysIsDownloaded: false,
               dateFrom: undefined,
               dateTo: undefined,
               dateInRange: true,
-              dateMode: undefined,
               advancedExpression: '',
             },
           },
@@ -308,7 +304,7 @@ describe('SchedulerPage', () => {
     renderPage()
 
     fireEvent.click(screen.getByRole('tab', { name: 'Filters' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'In range i' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: /In range/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Pick From date' }))
     fireEvent.change(screen.getByLabelText('Label entry'), { target: { value: 'vip' } })
     const labelsCard = screen.getByRole('heading', { name: /Labels/i }).closest('article')

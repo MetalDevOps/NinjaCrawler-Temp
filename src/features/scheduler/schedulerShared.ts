@@ -39,14 +39,12 @@ export function createCriteria(): SchedulerPlanCriteria {
     sitesExcluded: [],
     groupIdsIncluded: [],
     groupIdsExcluded: [],
-    groupsOnly: false,
     usersCount: undefined,
     daysNumber: undefined,
     daysIsDownloaded: false,
     dateFrom: undefined,
     dateTo: undefined,
     dateInRange: true,
-    dateMode: undefined,
     advancedExpression: '',
   }
 }

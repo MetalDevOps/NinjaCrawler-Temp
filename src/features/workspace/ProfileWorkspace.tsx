@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SourceProfile, WorkspaceSnapshot } from '../../domain/models'
 import { getPreviewSource } from './thumbnailCache'
 import {
@@ -173,9 +173,18 @@ export function ProfileWorkspace({
     [selectedSourceIds, sourceGroupMap],
   )
 
+  // Rola até o card apenas quando a SELEÇÃO muda. O snapshot é atualizado o
+  // tempo todo durante um sync (novas referências de sortedGroups), e sem este
+  // guard cada refresh puxava o scroll de volta ao card selecionado, brigando
+  // com a roda do mouse.
+  const lastScrolledSelectionRef = useRef<string | undefined>(undefined)
   useEffect(() => {
     const selectedSourceId = selectedSourceIds[selectedSourceIds.length - 1]
     if (!selectedSourceId) {
+      lastScrolledSelectionRef.current = undefined
+      return
+    }
+    if (lastScrolledSelectionRef.current === selectedSourceId) {
       return
     }
 
@@ -183,6 +192,7 @@ export function ProfileWorkspace({
       .find((candidate) => candidate.dataset.sourceId === selectedSourceId)
     if (element && typeof element.scrollIntoView === 'function') {
       element.scrollIntoView({ block: 'nearest' })
+      lastScrolledSelectionRef.current = selectedSourceId
     }
   }, [collapsedGroups, selectedSourceIds, sortedGroups])
 

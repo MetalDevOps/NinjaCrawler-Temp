@@ -175,11 +175,13 @@ where
         let window = create_likes_window(app, &session)?;
         let output = run_probe(
             &window,
-            &ms_token,
-            request.item_limit,
-            &known_present_ids,
-            incremental_active,
-            request.known_page_threshold,
+            &LikesProbePlan {
+                ms_token: &ms_token,
+                item_limit: request.item_limit,
+                known_present_ids: &known_present_ids,
+                incremental_active,
+                known_page_threshold: request.known_page_threshold,
+            },
             &mut report_progress,
             &is_cancelled,
         );
@@ -231,10 +233,12 @@ where
         let mut result = download_liked_videos(
             &session,
             &items,
-            &existing,
-            &disk_media_by_id,
-            request.collect_media_stats,
-            request.refresh_existing_media_stats,
+            &LikedVideosDownloadContext {
+                ledger: &existing,
+                disk_media_by_id: &disk_media_by_id,
+                collect_media_stats: request.collect_media_stats,
+                refresh_existing_media_stats: request.refresh_existing_media_stats,
+            },
             &mut report_progress,
             &is_cancelled,
         )?;
@@ -456,13 +460,19 @@ fn inject_cookies(window: &WebviewWindow<Wry>, cookies: &[StoredCookie]) -> Resu
     Ok(())
 }
 
-fn run_probe<F, C>(
-    window: &WebviewWindow<Wry>,
-    ms_token: &str,
+/// Parâmetros da varredura de likes dentro do WebView (paginação e critério
+/// de parada incremental).
+struct LikesProbePlan<'a> {
+    ms_token: &'a str,
     item_limit: usize,
-    known_present_ids: &HashSet<String>,
+    known_present_ids: &'a HashSet<String>,
     incremental_active: bool,
     known_page_threshold: usize,
+}
+
+fn run_probe<F, C>(
+    window: &WebviewWindow<Wry>,
+    plan: &LikesProbePlan<'_>,
     report_progress: &mut F,
     is_cancelled: &C,
 ) -> Result<Value, String>
@@ -470,6 +480,13 @@ where
     F: FnMut(Option<u32>, String, String, bool, Option<u32>),
     C: Fn() -> bool,
 {
+    let &LikesProbePlan {
+        ms_token,
+        item_limit,
+        known_present_ids,
+        incremental_active,
+        known_page_threshold,
+    } = plan;
     if let Err(error) = wait_until(
         window,
         "Boolean(window.byted_acrawler?.frontierSign)",
@@ -827,13 +844,19 @@ window.__ninjaCrawlerTikTokLikesProgress = {{ pages: 0, items: 0 }};
     )
 }
 
+/// O que já se sabe sobre a mídia local e as opções de stats, usados para
+/// decidir por item entre baixar, pular ou só atualizar estatísticas.
+struct LikedVideosDownloadContext<'a> {
+    ledger: &'a HashMap<String, String>,
+    disk_media_by_id: &'a HashMap<String, PathBuf>,
+    collect_media_stats: bool,
+    refresh_existing_media_stats: bool,
+}
+
 fn download_liked_videos<F, C>(
     session: &StoredSession,
     items: &[LikedVideo],
-    ledger: &HashMap<String, String>,
-    disk_media_by_id: &HashMap<String, PathBuf>,
-    collect_media_stats: bool,
-    refresh_existing_media_stats: bool,
+    context: &LikedVideosDownloadContext<'_>,
     report_progress: &mut F,
     is_cancelled: &C,
 ) -> Result<TikTokLikesSyncResult, String>
@@ -841,6 +864,12 @@ where
     F: FnMut(Option<u32>, String, String, bool, Option<u32>),
     C: Fn() -> bool,
 {
+    let &LikedVideosDownloadContext {
+        ledger,
+        disk_media_by_id,
+        collect_media_stats,
+        refresh_existing_media_stats,
+    } = context;
     let mut stats = TikTokLikesSyncResult {
         discovered: items.len(),
         ..TikTokLikesSyncResult::default()
@@ -884,7 +913,7 @@ where
                     stats.stats_updated += 1;
                 }
                 stats.skipped_existing += 1;
-                if stats.skipped_existing == 1 || stats.skipped_existing % 50 == 0 {
+                if stats.skipped_existing == 1 || stats.skipped_existing.is_multiple_of(50) {
                     connector_debug::append_current(
                         "internal.tiktok.likes",
                         "system",

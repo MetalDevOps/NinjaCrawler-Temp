@@ -38,7 +38,7 @@ const ACCOUNTS_TABS: Array<{
 }> = [
   { key: 'account', label: 'Account' },
   { key: 'defaults', label: 'Defaults', categories: ['defaults', 'extractVideo'] },
-  { key: 'provider', label: 'Provider', categories: ['authorization', 'download', 'timers', 'errors', 'diagnostics'] },
+  { key: 'provider', label: 'Provider', categories: ['authorization', 'download', 'timers', 'errors'] },
 ]
 
 function createDraft(providerCatalog: ProviderDescriptor[], provider?: ProviderKey): ProviderAccountUpsert {

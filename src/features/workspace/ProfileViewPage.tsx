@@ -10,6 +10,7 @@ import {
   openExternalTarget,
   openMediaFile,
   revealMediaInFolder,
+  runSourceSync,
   subscribeToProfileViewSource,
   subscribeToSourceSyncQueue,
 } from '../../bridge/desktop'
@@ -292,6 +293,14 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const [densityIndex, setDensityIndex] = useState<number>(readStoredDensity)
   const [sortField, setSortField] = useState<SortField>(readStoredSortField)
   const [sortDir, setSortDir] = useState<SortDir>(readStoredSortDir)
+  // Só o TikTok coleta contagem de views hoje; nos demais providers o eixo
+  // Popularity fica oculto e uma preferência persistida cai em Creation date.
+  const popularitySortAvailable = gallery?.provider === 'tiktok'
+  const effectiveSortField: SortField =
+    !popularitySortAvailable && sortField === 'popularity' ? 'creation' : sortField
+  // Ação pontual (TikTok): enfileira um sync que re-coleta stats da mídia já
+  // baixada, sem alterar as opções persistidas do perfil.
+  const [statsRefreshState, setStatsRefreshState] = useState<'idle' | 'queueing' | 'queued'>('idle')
   const [sortMenuOpen, setSortMenuOpen] = useState(false)
   const sortMenuRef = useRef<HTMLDivElement>(null)
   // Busca por autor, exclusiva da aba Likes: a lupa expande o campo inline.
@@ -491,17 +500,17 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     }
     const dir = sortDir === 'oldest' ? 1 : -1
     return [...base].sort((a, b) => {
-      const va = orderValue(a, sortField)
-      const vb = orderValue(b, sortField)
+      const va = orderValue(a, effectiveSortField)
+      const vb = orderValue(b, effectiveSortField)
       if (va == null && vb == null) return 0
       if (va == null) return 1
       if (vb == null) return -1
       if (va !== vb) return (va - vb) * dir
       // Empate por popularidade: desempata pela data de criação (mais recente antes).
-      if (sortField === 'popularity') return (b.capturedAt ?? 0) - (a.capturedAt ?? 0)
+      if (effectiveSortField === 'popularity') return (b.capturedAt ?? 0) - (a.capturedAt ?? 0)
       return 0
     })
-  }, [visiblePosts, sortField, sortDir, sectionFilter, likesQuery])
+  }, [visiblePosts, effectiveSortField, sortDir, sectionFilter, likesQuery])
 
   // Agrupa por dia usando Map (não sequencial): quando a ordem não é por data
   // — ex.: ordenação por popularidade — posts do mesmo dia podem não ser
@@ -510,7 +519,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     const groups: DayGroup[] = []
     const byKey = new Map<string, DayGroup>()
     for (const post of sortedPosts) {
-      const ts = orderTimestamp(post, sortField)
+      const ts = orderTimestamp(post, effectiveSortField)
       const key = dayKey(ts)
       let group = byKey.get(key)
       if (!group) {
@@ -521,7 +530,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
       group.posts.push(post)
     }
     return groups
-  }, [sortedPosts, sortField])
+  }, [sortedPosts, effectiveSortField])
 
   // Agrupa os Highlights por álbum (subpasta sob `Stories/`). Os posts já vêm
   // do mais recente ao mais antigo, então a 1ª aparição ordena os álbuns pelo
@@ -1220,6 +1229,44 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   )}
                 </div>
               ) : null}
+              {popularitySortAvailable && sourceId ? (
+                <button
+                  className="ghost-button queue-icon-button profile-view-stats-refresh"
+                  disabled={statsRefreshState === 'queueing'}
+                  onClick={() => {
+                    if (statsRefreshState === 'queueing') return
+                    setStatsRefreshState('queueing')
+                    runSourceSync(sourceId, {
+                      trigger: 'manual_stats_refresh',
+                      runMode: 'refresh_media_stats',
+                    })
+                      .then(() => {
+                        setStatsRefreshState('queued')
+                        window.setTimeout(() => setStatsRefreshState('idle'), 4000)
+                      })
+                      .catch((refreshError) => {
+                        setStatsRefreshState('idle')
+                        const message = refreshError instanceof Error ? refreshError.message : String(refreshError)
+                        window.alert(`Failed to queue the media stats refresh.\n${message}`)
+                      })
+                  }}
+                  type="button"
+                  aria-label="Refresh media stats"
+                  title={statsRefreshState === 'queued'
+                    ? 'Media stats refresh queued'
+                    : 'Refresh media stats (views, likes, comments, shares) for downloaded media'}
+                >
+                  {statsRefreshState === 'queued' ? (
+                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                      <path d="M5 12.5 10 17.5 19 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                      <path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                </button>
+              ) : null}
               <div className="profile-view-sort" ref={sortMenuRef}>
                 <button
                   className="ghost-button queue-icon-button profile-view-sort-toggle"
@@ -1247,39 +1294,41 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                     <button
                       className="menu-item profile-view-sort-item"
                       role="menuitemradio"
-                      aria-checked={sortField === 'creation'}
+                      aria-checked={effectiveSortField === 'creation'}
                       onClick={() => setSortField('creation')}
                       type="button"
                     >
                       <span className="profile-view-sort-check" aria-hidden="true">
-                        {sortField === 'creation' ? '✓' : ''}
+                        {effectiveSortField === 'creation' ? '✓' : ''}
                       </span>
                       Creation date
                     </button>
                     <button
                       className="menu-item profile-view-sort-item"
                       role="menuitemradio"
-                      aria-checked={sortField === 'download'}
+                      aria-checked={effectiveSortField === 'download'}
                       onClick={() => setSortField('download')}
                       type="button"
                     >
                       <span className="profile-view-sort-check" aria-hidden="true">
-                        {sortField === 'download' ? '✓' : ''}
+                        {effectiveSortField === 'download' ? '✓' : ''}
                       </span>
                       Download date
                     </button>
-                    <button
-                      className="menu-item profile-view-sort-item"
-                      role="menuitemradio"
-                      aria-checked={sortField === 'popularity'}
-                      onClick={() => setSortField('popularity')}
-                      type="button"
-                    >
-                      <span className="profile-view-sort-check" aria-hidden="true">
-                        {sortField === 'popularity' ? '✓' : ''}
-                      </span>
-                      Popularity
-                    </button>
+                    {popularitySortAvailable ? (
+                      <button
+                        className="menu-item profile-view-sort-item"
+                        role="menuitemradio"
+                        aria-checked={effectiveSortField === 'popularity'}
+                        onClick={() => setSortField('popularity')}
+                        type="button"
+                      >
+                        <span className="profile-view-sort-check" aria-hidden="true">
+                          {effectiveSortField === 'popularity' ? '✓' : ''}
+                        </span>
+                        Popularity
+                      </button>
+                    ) : null}
                     <div className="profile-view-sort-divider" role="separator" />
                     <button
                       className="menu-item profile-view-sort-item"
@@ -1291,7 +1340,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                       <span className="profile-view-sort-check" aria-hidden="true">
                         {sortDir === 'newest' ? '✓' : ''}
                       </span>
-                      {sortField === 'popularity' ? 'Most viewed first' : 'Newest first'}
+                      {effectiveSortField === 'popularity' ? 'Most viewed first' : 'Newest first'}
                     </button>
                     <button
                       className="menu-item profile-view-sort-item"
@@ -1303,7 +1352,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                       <span className="profile-view-sort-check" aria-hidden="true">
                         {sortDir === 'oldest' ? '✓' : ''}
                       </span>
-                      {sortField === 'popularity' ? 'Least viewed first' : 'Oldest first'}
+                      {effectiveSortField === 'popularity' ? 'Least viewed first' : 'Oldest first'}
                     </button>
                   </div>
                 ) : null}

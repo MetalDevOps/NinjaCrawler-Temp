@@ -16,6 +16,7 @@ import type {
   SyncPlanUpsert,
 } from '../../domain/models'
 import { useAppStore } from '../../state/appStore'
+import { HelpTip } from '../shared/HelpTip'
 import {
   PAUSE_PRESETS,
   PROVIDERS,
@@ -96,20 +97,7 @@ function selectionSummary(values: string[], optionsMap: Map<string, string>, fal
 }
 
 function helpButton(label: string, tooltip?: string) {
-  if (!tooltip) {
-    return null
-  }
-
-  return (
-    <button
-      aria-label={`${label} help`}
-      className="accounts-help-tooltip"
-      title={tooltip}
-      type="button"
-    >
-      i
-    </button>
-  )
+  return <HelpTip label={label} tooltip={tooltip} />
 }
 
 function countSummary(count: number, singular: string, plural: string): string {
@@ -1098,7 +1086,7 @@ export function SchedulerPage({ initialIntent }: SchedulerPageProps) {
 
               <article className="panel plans-section-card plans-filter-card plans-filter-card-condensed">
                 <div className="panel-header compact-header">
-                  <h2 className="plans-filter-heading">Freshness &amp; limits {helpButton('Down', 'Matches sources by their last synced date. Checked means recently downloaded; unchecked means stale or not yet synced.')}</h2>
+                  <h2 className="plans-filter-heading">Freshness &amp; limits {helpButton('Freshness & limits', 'Matches sources by their last synced date. Checked means recently downloaded; unchecked means stale or not yet synced.')}</h2>
                   <span className="pill plans-filter-summary-pill" title="Combines the freshness rule and the optional users cap.">{freshnessSummary}</span>
                 </div>
                 <div className="plans-filter-inline-grid plans-filter-inline-grid-freshness">
@@ -1106,7 +1094,7 @@ export function SchedulerPage({ initialIntent }: SchedulerPageProps) {
                     <input checked={planDraft.criteria.daysIsDownloaded} onChange={(event) => updateCriteria('daysIsDownloaded', checkbox(event))} type="checkbox" />
                     <span className="plans-toggle-label">
                       {planDraft.criteria.daysIsDownloaded ? 'Downloaded recently' : 'Not downloaded recently'}
-                      {helpButton('Down', 'The checkbox changes the direction of the freshness test instead of changing which date field is used.')}
+                      {helpButton('Freshness direction', 'The checkbox changes the direction of the freshness test instead of changing which date field is used.')}
                     </span>
                   </label>
                   <label className="field">

@@ -1205,6 +1205,13 @@ p {
   align-items: end;
 }
 
+.settings-entry-description {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .settings-row {
   display: grid;
   gap: 0.55rem;
@@ -10759,4 +10766,29 @@ p {
 .single-videos-context-menu button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* ---- Zero-distinction em textos dinâmicos ----
+   Superfícies que exibem contagens, ids e resumos gerados usam a fonte de
+   dados (zero cortado + números tabulares) para "0" nunca ler como "o".
+   Mantém o padrão já aplicado em queue-data, runtime-log-entry-facts e
+   scheduler-plan-row-meta. */
+.runtime-log-entry-message,
+.runtime-log-entry-detail,
+.queue-recent-summary,
+.queue-recent-error,
+.status-cell strong,
+.plans-inline-summary span,
+.list-row span,
+.list-row small,
+.import-window-run-summary,
+.import-window-toolbar-stat,
+.import-window-results-meta,
+.import-queue-summary-metrics,
+.import-review-summary-strip,
+.profile-view-meta,
+.profile-view-selectbar-count {
+  font-family: var(--font-data);
+  font-feature-settings: "zero" 1, "tnum" 1;
+  font-variant-numeric: tabular-nums slashed-zero;
 }
