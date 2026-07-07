@@ -1632,6 +1632,8 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     resolved_avatar_url: None,
                     duplicate_user_id: None,
                     resolved_handle: None,
+                    profile_unavailable: false,
+                    profile_private: false,
                     manifest_summary: tiktok_connector::TikTokManifestSummary::default(),
                 })
             };
@@ -1766,6 +1768,155 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                     );
                     return Ok(outcome);
                 }
+            }
+
+            // Perfil indisponível: o yt-dlp não resolveu o dono do perfil e não
+            // houve renomeação a recuperar. Marca a fonte e reporta "bloqueado"
+            // em vez de um sync bem-sucedido com zero posts (paridade com o
+            // Instagram, que sinaliza `instagram_username_unresolvable`).
+            if result.profile_unavailable {
+                let problem_code = "tiktok_profile_unavailable";
+                let problem_message = format!(
+                    "TikTok profile '@{}' (source id {}) is unavailable. The account may have been renamed, made private, deactivated, or banned.",
+                    handle, context.source.id
+                );
+                let mark_error = set_source_sync_problem(
+                    connection,
+                    &context.source.id,
+                    problem_code,
+                    &problem_message,
+                    &finished_at,
+                    true,
+                );
+                let mut summary = format!("TikTok sync blocked: {problem_message}");
+                if let Err(mark_failure) = mark_error {
+                    summary.push_str(&format!(
+                        " Failed to persist source problem marker: {mark_failure}."
+                    ));
+                } else {
+                    log_runtime_event(
+                        layout,
+                        "sync.profile",
+                        "warning",
+                        RuntimeLogAnchor {
+                            account_id: Some(&context.account.id),
+                            provider: Some(&context.source.provider),
+                            source_id: Some(&context.source.id),
+                            source_handle: Some(&context.source.handle),
+                        },
+                        format!(
+                            "Marked source '{}' as '{}': {}",
+                            context.source.handle, problem_code, problem_message
+                        ),
+                        None,
+                    );
+                }
+                let outcome = SourceSyncOutcome {
+                    tool: "internal.tiktok".to_string(),
+                    status: "failed".to_string(),
+                    summary: summary.clone(),
+                    command_preview: command_preview.clone(),
+                    manifest_summary_json: None,
+                    degraded_capabilities: Vec::new(),
+                    validation_error: Some(summary),
+                };
+                persist_source_sync_run(
+                    connection,
+                    context,
+                    &outcome,
+                    trigger,
+                    &started_at,
+                    &finished_at,
+                )?;
+                propagate_source_sync_account_health(
+                    connection,
+                    context,
+                    &outcome,
+                    &finished_at,
+                )?;
+                source_sync_runtime::report_source_sync_progress(
+                    &context.source.id,
+                    Some(100),
+                    Some("Profile unavailable".to_string()),
+                    Some(outcome.summary.clone()),
+                    false,
+                    None,
+                );
+                return Ok(outcome);
+            }
+
+            // Perfil privado não seguido: existe, mas não há mídia acessível.
+            // Marca "perfil privado" e desliga `ready_for_download` (não há o que
+            // baixar enquanto a conta não seguir o perfil); reporta "skipped".
+            if result.profile_private {
+                let problem_code = "tiktok_profile_private_or_restricted";
+                let problem_message = format!(
+                    "TikTok profile '@{}' (source id {}) is private and the signed-in account does not follow it, so no media is accessible.",
+                    handle, context.source.id
+                );
+                let mark_error = set_source_sync_problem(
+                    connection,
+                    &context.source.id,
+                    problem_code,
+                    &problem_message,
+                    &finished_at,
+                    true,
+                );
+                let mut summary = format!("TikTok sync skipped: {problem_message}");
+                if let Err(mark_failure) = mark_error {
+                    summary.push_str(&format!(
+                        " Failed to persist source problem marker: {mark_failure}."
+                    ));
+                } else {
+                    log_runtime_event(
+                        layout,
+                        "sync.profile",
+                        "info",
+                        RuntimeLogAnchor {
+                            account_id: Some(&context.account.id),
+                            provider: Some(&context.source.provider),
+                            source_id: Some(&context.source.id),
+                            source_handle: Some(&context.source.handle),
+                        },
+                        format!(
+                            "Marked source '{}' as '{}': {}",
+                            context.source.handle, problem_code, problem_message
+                        ),
+                        None,
+                    );
+                }
+                let outcome = SourceSyncOutcome {
+                    tool: "internal.tiktok".to_string(),
+                    status: "skipped".to_string(),
+                    summary: summary.clone(),
+                    command_preview: command_preview.clone(),
+                    manifest_summary_json: None,
+                    degraded_capabilities: Vec::new(),
+                    validation_error: None,
+                };
+                persist_source_sync_run(
+                    connection,
+                    context,
+                    &outcome,
+                    trigger,
+                    &started_at,
+                    &finished_at,
+                )?;
+                propagate_source_sync_account_health(
+                    connection,
+                    context,
+                    &outcome,
+                    &finished_at,
+                )?;
+                source_sync_runtime::report_source_sync_progress(
+                    &context.source.id,
+                    Some(100),
+                    Some("Private profile".to_string()),
+                    Some(outcome.summary.clone()),
+                    false,
+                    None,
+                );
+                return Ok(outcome);
             }
 
             // Os ledgers são provider-neutral no banco; reusamos os structs do
@@ -1962,6 +2113,28 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
         &finished_at,
     )?;
     propagate_source_sync_account_health(connection, context, &outcome, &finished_at)?;
+    // Sync bem-sucedido limpa qualquer marcador anterior (ex.: perfil que voltou
+    // a ficar disponível deixa de exibir o badge "Profile unavailable").
+    if outcome.status == "succeeded" {
+        if let Err(error) = clear_source_sync_problem(connection, &context.source.id, &finished_at)
+        {
+            log_runtime_event(
+                layout,
+                "sync.profile",
+                "warning",
+                RuntimeLogAnchor {
+                    account_id: Some(&context.account.id),
+                    provider: Some(&context.source.provider),
+                    source_id: Some(&context.source.id),
+                    source_handle: Some(&context.source.handle),
+                },
+                format!(
+                    "TikTok sync succeeded, but failed to clear source sync problem marker: {error}"
+                ),
+                Some(error),
+            );
+        }
+    }
     source_sync_runtime::report_source_sync_progress(
         &context.source.id,
         Some(100),
@@ -2292,7 +2465,7 @@ pub(super) fn resolve_instagram_source_identity_preflight(
                     problem_code,
                     &problem_message,
                     timestamp,
-                    false,
+                    true,
                 );
                 let mut summary = format!("Instagram sync skipped: {problem_message}");
                 if let Err(mark_failure) = mark_error {
@@ -2693,7 +2866,7 @@ pub(super) fn apply_instagram_availability_action(
             handle_changed,
         } => {
             let problem_message = format!(
-                "Instagram profile '{}' (source id {}) appears to be private or temporarily restricted. This is informative and does not disable download readiness.",
+                "Instagram profile '{}' (source id {}) appears to be private or temporarily restricted, so no media is accessible and download readiness is paused.",
                 previous_handle, source_id
             );
             let marker = set_source_sync_problem(
@@ -2702,7 +2875,7 @@ pub(super) fn apply_instagram_availability_action(
                 "instagram_profile_private_or_restricted",
                 &problem_message,
                 now,
-                false,
+                true,
             );
             tally.marked_problem += 1;
 
@@ -3425,6 +3598,7 @@ pub(super) fn execute_instagram_source_sync_with_connection(
             } else {
                 format!("Instagram sync failed: {}", error)
             };
+            let mut status = "failed".to_string();
             if instagram_error_indicates_rate_limit(&error) {
                 let cooldown_until = set_instagram_sync_cooldown(
                     connection,
@@ -3438,10 +3612,70 @@ pub(super) fn execute_instagram_source_sync_with_connection(
                 ));
             } else if !cancelled_by_user {
                 clear_instagram_sync_cooldown(connection, &context.account.id)?;
+                // Erros de identidade podem vazar do sync principal (o preflight
+                // nem sempre roda; a timeline falha depois com o marcador do
+                // probe embutido no erro). Classifica-os para pausar a fonte e
+                // exibir o badge, como já faz o preflight de identidade.
+                let marked = match classify_instagram_identity_error(&error) {
+                    InstagramIdentityErrorClassification::UsernameUnresolvable => Some((
+                        "instagram_username_unresolvable",
+                        format!(
+                            "Instagram profile '{}' (source id {}) could not be resolved. The account may have been renamed, disabled, or banned.",
+                            context.source.handle, context.source.id
+                        ),
+                    )),
+                    InstagramIdentityErrorClassification::PrivateOrRestricted => {
+                        status = "skipped".to_string();
+                        Some((
+                            "instagram_profile_private_or_restricted",
+                            format!(
+                                "Instagram profile '{}' (source id {}) is private or restricted, so no media is accessible.",
+                                context.source.handle, context.source.id
+                            ),
+                        ))
+                    }
+                    InstagramIdentityErrorClassification::Other => None,
+                };
+                if let Some((problem_code, problem_message)) = marked {
+                    if let Err(mark_failure) = set_source_sync_problem(
+                        connection,
+                        &context.source.id,
+                        problem_code,
+                        &problem_message,
+                        &finished_at,
+                        true,
+                    ) {
+                        summary.push_str(&format!(
+                            " Failed to persist source problem marker: {mark_failure}."
+                        ));
+                    } else {
+                        log_runtime_event(
+                            layout,
+                            "sync.profile",
+                            if status == "skipped" { "info" } else { "warning" },
+                            RuntimeLogAnchor {
+                                account_id: Some(&context.account.id),
+                                provider: Some(&context.source.provider),
+                                source_id: Some(&context.source.id),
+                                source_handle: Some(&context.source.handle),
+                            },
+                            format!(
+                                "Marked source '{}' as '{}': {}",
+                                context.source.handle, problem_code, problem_message
+                            ),
+                            None,
+                        );
+                    }
+                }
             }
+            let validation_error = if cancelled_by_user || status == "skipped" {
+                None
+            } else {
+                Some(error)
+            };
             SourceSyncOutcome {
                 tool: "internal.instagram".to_string(),
-                status: "failed".to_string(),
+                status,
                 summary,
                 command_preview: format!(
                     "internal.instagram profile {} -> {}",
@@ -3450,7 +3684,7 @@ pub(super) fn execute_instagram_source_sync_with_connection(
                 ),
                 manifest_summary_json: None,
                 degraded_capabilities: Vec::new(),
-                validation_error: if cancelled_by_user { None } else { Some(error) },
+                validation_error,
             }
         }
     };

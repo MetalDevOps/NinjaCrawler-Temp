@@ -6,8 +6,10 @@ export function syncProblemBadgeLabel(syncProblemCode?: string): string {
 
   switch (code) {
     case 'instagram_profile_private_or_restricted':
+    case 'tiktok_profile_private_or_restricted':
       return 'Private profile'
     case 'instagram_username_unresolvable':
+    case 'tiktok_profile_unavailable':
       return 'Profile unavailable'
     case 'auth_required':
       return 'Auth required'
@@ -21,5 +23,8 @@ export function isBlockingSyncProblem(syncProblemCode?: string): boolean {
   if (!code) {
     return false
   }
-  return code !== 'instagram_profile_private_or_restricted'
+  // Any known sync problem — private/restricted, unavailable, auth required —
+  // pauses the source (`ready_for_download` is turned off), so every non-empty
+  // problem code is blocking.
+  return true
 }
