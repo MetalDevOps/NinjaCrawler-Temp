@@ -3290,6 +3290,128 @@ fn run_instagram_scrawler_import_seeds_ledgers_from_legacy_data_xml() {
 }
 
 #[test]
+fn import_backfill_recategorizes_legacy_reels_mislabeled_as_timeline() {
+    use base64::Engine as _;
+
+    let (_temp_dir, layout) = create_test_layout();
+    let legacy_root = layout.media_root.join("legacy-import").join("reel.user");
+    create_legacy_instagram_profile_root(&legacy_root, "instagram-account", "reel.user", None)
+        .expect("legacy profile fixture");
+    let legacy_file_name = "AQreelclipabcdefghijklmnopqrstuvwxyz0123456789.mp4";
+    fs::write(legacy_root.join(legacy_file_name), b"video").expect("legacy media");
+
+    // CDN URL with the `xpv_encode_tag` INSTAGRAM.CLIPS embedded in the `efg`
+    // (base64), the way SCrawler stores reels. The permalink uses `/p/` (not
+    // `/reel/`), reproducing the case that wrongly fell into `timeline`.
+    let payload =
+        "{\"xpv_encode_tag\":\"xpv_progressive.INSTAGRAM.CLIPS.C3.720.dash_baseline_1_v1\"}";
+    let efg = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
+    // In the XML the query-string `&` come escaped as `&amp;` (roxmltree
+    // unescapes them back to `&` when reading the attribute, as in production).
+    let media_url = format!("https://cdn.example/AQreel.mp4?_nc_cat=1&amp;efg={efg}&amp;ccb=1");
+
+    create_legacy_instagram_data_xml(
+        &legacy_root,
+        legacy_file_name,
+        "3827569610392183305_46332873582",
+        None,
+        &media_url,
+        "https://www.instagram.com/p/DUeQkgEgaIJ/",
+    )
+    .expect("legacy data xml");
+
+    let (media_section, post_section) =
+        with_workspace_layout(layout, |connection, test_layout| {
+            upsert_provider_account_with_connection(
+                connection,
+                test_layout,
+                sample_account("account-1", "instagram"),
+            )?;
+
+            let manual_root = legacy_root.display().to_string();
+            let preview = preview_instagram_scrawler_import_with_connection(
+                connection,
+                test_layout,
+                ImportPreviewOptions {
+                    force_reimport: false,
+                    manual_roots: vec![manual_root.clone()],
+                    disabled_roots: Vec::new(),
+                },
+            )?;
+            let result = run_instagram_scrawler_import_with_connection(
+                connection,
+                test_layout,
+                ImportRunRequest {
+                    force_reimport: false,
+                    manual_roots: vec![manual_root],
+                    disabled_roots: Vec::new(),
+                    resolutions: preview
+                        .profiles
+                        .iter()
+                        .map(|profile| ImportResolution {
+                            profile_root: profile.profile_root.clone(),
+                            action: "import".to_string(),
+                            account_id: profile.account_id.clone(),
+                        })
+                        .collect(),
+                },
+            )?;
+            let source_id = result
+                .profiles
+                .first()
+                .and_then(|profile| profile.source_id.as_deref())
+                .ok_or_else(|| "imported source id missing".to_string())?
+                .to_string();
+
+            // Simulate the WRONG pre-fix state: the reel stored as `timeline`
+            // in both ledgers (legacy import via a `/p/` permalink).
+            connection
+                .execute(
+                    "UPDATE instagram_sync_media_ledger SET media_section = 'timeline' WHERE source_id = ?1",
+                    params![source_id],
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute(
+                    "UPDATE instagram_sync_post_ledger SET media_section = 'timeline' WHERE source_id = ?1",
+                    params![source_id],
+                )
+                .map_err(|error| error.to_string())?;
+
+            // The backfill must recategorize timeline -> reels via the URL signal.
+            let mut noop = |_progress: InstagramNamingLedgerBackfillProgress| {};
+            run_instagram_media_naming_ledger_backfill_with_connection(
+                connection,
+                test_layout,
+                &mut noop,
+            )?;
+
+            let media_section = connection
+                .query_row(
+                    "SELECT media_section FROM instagram_sync_media_ledger WHERE source_id = ?1 LIMIT 1",
+                    params![source_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            let post_section = connection
+                .query_row(
+                    "SELECT media_section FROM instagram_sync_post_ledger WHERE source_id = ?1 LIMIT 1",
+                    params![source_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok((media_section, post_section))
+        })
+        .expect("backfill should recategorize the mislabeled reel");
+
+    assert_eq!(
+        media_section, "reels",
+        "media ledger should be recategorized"
+    );
+    assert_eq!(post_section, "reels", "post ledger should be recategorized");
+}
+
+#[test]
 fn run_instagram_scrawler_import_seeds_media_aliases_from_legacy_url() {
     let (_temp_dir, layout) = create_test_layout();
     let legacy_root = layout.media_root.join("legacy-import").join("alias.user");

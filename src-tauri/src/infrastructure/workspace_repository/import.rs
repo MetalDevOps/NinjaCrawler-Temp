@@ -1,5 +1,7 @@
 use super::*;
 
+use base64::Engine as _;
+
 #[derive(Clone)]
 pub(super) struct LegacyInstagramProfileXml {
     pub(super) account_name: Option<String>,
@@ -1063,6 +1065,7 @@ pub(super) fn load_legacy_instagram_post_codes(
         let section = Some(infer_legacy_instagram_media_section(
             entry.special_folder.as_deref(),
             permalink,
+            Some(entry.media_url.as_str()),
         ));
         map.entry(relative_path).or_insert((post_code, section));
     }
@@ -1095,6 +1098,7 @@ pub(super) fn load_legacy_twitter_post_keys(profile_root: &Path) -> HashMap<Stri
 pub(super) fn infer_legacy_instagram_media_section(
     special_folder: Option<&str>,
     permalink: &str,
+    media_url: Option<&str>,
 ) -> String {
     let normalized_folder = special_folder
         .map(normalize_legacy_instagram_relative_path)
@@ -1107,11 +1111,74 @@ pub(super) fn infer_legacy_instagram_media_section(
         "stories".to_string()
     } else if normalized_folder.contains("tag") {
         "tagged".to_string()
-    } else if normalized_folder.contains("reel") || normalized_permalink.contains("/reel/") {
+    } else if normalized_folder.contains("reel")
+        || normalized_permalink.contains("/reel/")
+        // SCrawler stores reels with inconsistent permalinks: some as
+        // `/reel/<code>`, others as `/p/<code>` (which also opens reels).
+        // The reliable signal is the video CDN URL, whose `xpv_encode_tag`
+        // (inside the base64 `efg` query param) carries `INSTAGRAM.CLIPS` for
+        // reels and `INSTAGRAM.FEED`/`STORY` for the rest.
+        || media_url.is_some_and(legacy_media_url_is_clip)
+    {
         "reels".to_string()
     } else {
         "timeline".to_string()
     }
+}
+
+/// `true` when the SCrawler media URL belongs to a reel, detected via the
+/// `xpv_encode_tag` (`…INSTAGRAM.CLIPS…`) embedded — as base64 — in the `efg`
+/// query param of the CDN URL. Feed videos carry `INSTAGRAM.FEED` and stories
+/// `INSTAGRAM.STORY`; images have no `efg`.
+fn legacy_media_url_is_clip(media_url: &str) -> bool {
+    let Some(efg) = extract_url_query_param(media_url, "efg") else {
+        return false;
+    };
+    let decoded_param = percent_decode_ascii(&efg);
+    // Strip the padding so both `…=` and the padding-less form decode.
+    let unpadded = decoded_param.trim_end_matches('=');
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(unpadded) else {
+        return false;
+    };
+    let decoded = String::from_utf8_lossy(&bytes);
+    decoded.contains(".CLIPS.")
+}
+
+/// Extracts the raw value of a query parameter (`name=<value>`) from a URL
+/// without a full parser. Returns the slice up to the next `&`.
+fn extract_url_query_param(url: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=");
+    let start = url.find(&needle)? + needle.len();
+    let rest = &url[start..];
+    let end = rest.find('&').unwrap_or(rest.len());
+    let value = &rest[..end];
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// Decodes percent-encoded (`%XX`) sequences of an ASCII string. Invalid or
+/// truncated bytes are kept as-is (best-effort).
+fn percent_decode_ascii(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hi = (bytes[index + 1] as char).to_digit(16);
+            let lo = (bytes[index + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 pub(super) fn collect_legacy_instagram_reconciliation_records(
     profile_root: &Path,
@@ -1236,6 +1303,7 @@ pub(super) fn collect_legacy_instagram_reconciliation_records(
             media_section: infer_legacy_instagram_media_section(
                 entry.special_folder.as_deref(),
                 permalink,
+                Some(entry.media_url.as_str()),
             ),
         });
     }
@@ -1931,20 +1999,13 @@ pub(super) fn load_account_import_backup_secret_ref(
         .map(|value| value.flatten())
         .map_err(|error| error.to_string())
 }
-pub(super) fn reconcile_instagram_scrawler_profile_ledgers_with_connection(
-    connection: &Connection,
-    profile_root: &Path,
-    source_id: &str,
-    account_id: &str,
-    source_handle: &str,
-    timestamp: &str,
-) -> Result<LegacyInstagramReconciliationStats, String> {
-    let records = collect_legacy_instagram_reconciliation_records(profile_root)?;
-    if records.is_empty() {
-        return Ok(LegacyInstagramReconciliationStats::default());
-    }
-
-    let downloaded_media = records
+/// Converts legacy reconciliation records into `DownloadedInstagramMedia`
+/// (the shape the ledger upserts consume). Shared between the import
+/// reconciliation and the recategorization backfill.
+pub(super) fn legacy_reconciliation_records_to_downloaded_media(
+    records: &[LegacyInstagramReconciliationRecord],
+) -> Vec<instagram_connector::DownloadedInstagramMedia> {
+    records
         .iter()
         .map(|record| instagram_connector::DownloadedInstagramMedia {
             file_path: record.file_path.clone(),
@@ -1976,11 +2037,17 @@ pub(super) fn reconcile_instagram_scrawler_profile_ledgers_with_connection(
             pattern_mode: "legacy_backfill".to_string(),
             pattern_template: None,
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
 
+/// Derives the observed posts (deduplicated by `provider_post_key`) from the
+/// legacy reconciliation records.
+pub(super) fn legacy_reconciliation_records_to_observed_posts(
+    records: &[LegacyInstagramReconciliationRecord],
+) -> Vec<instagram_connector::ObservedInstagramPost> {
     let mut observed_posts_by_key =
         HashMap::<String, instagram_connector::ObservedInstagramPost>::new();
-    for record in &records {
+    for record in records {
         if record.provider_post_key.trim().is_empty() {
             continue;
         }
@@ -1993,7 +2060,24 @@ pub(super) fn reconcile_instagram_scrawler_profile_ledgers_with_connection(
                 media_section: record.media_section.clone(),
             });
     }
-    let observed_posts = observed_posts_by_key.into_values().collect::<Vec<_>>();
+    observed_posts_by_key.into_values().collect::<Vec<_>>()
+}
+
+pub(super) fn reconcile_instagram_scrawler_profile_ledgers_with_connection(
+    connection: &Connection,
+    profile_root: &Path,
+    source_id: &str,
+    account_id: &str,
+    source_handle: &str,
+    timestamp: &str,
+) -> Result<LegacyInstagramReconciliationStats, String> {
+    let records = collect_legacy_instagram_reconciliation_records(profile_root)?;
+    if records.is_empty() {
+        return Ok(LegacyInstagramReconciliationStats::default());
+    }
+
+    let downloaded_media = legacy_reconciliation_records_to_downloaded_media(&records);
+    let observed_posts = legacy_reconciliation_records_to_observed_posts(&records);
 
     upsert_instagram_media_ledger_entries(
         connection,
@@ -2077,5 +2161,122 @@ pub(super) fn parse_cookie_import_content(
             "Cookie import format '{}' is not supported.",
             other
         )),
+    }
+}
+
+#[cfg(test)]
+mod reels_section_inference_tests {
+    use super::{infer_legacy_instagram_media_section, legacy_media_url_is_clip};
+    use base64::Engine as _;
+
+    /// Builds an Instagram video CDN URL with the given `xpv_encode_tag`
+    /// embedded — as base64 — in the `efg` param, the way SCrawler stores it.
+    /// `url_encode_padding` reproduces the `%3D` the XML usually carries.
+    fn media_url_with_encode_tag(encode_tag: &str, url_encode_padding: bool) -> String {
+        let payload = format!(
+            "{{\"xpv_encode_tag\":\"{encode_tag}\",\"xpv_asset_id\":123,\"duration_s\":14}}"
+        );
+        let mut efg = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
+        if url_encode_padding {
+            efg = efg.replace('=', "%3D");
+        }
+        format!("https://instagram.fxxx-1.fna.fbcdn.net/o1/v/t2/f2/m367/AQxxx.mp4?_nc_cat=101&efg={efg}&ccb=17-1&oh=00_deadbeef&oe=696E87EA")
+    }
+
+    #[test]
+    fn detects_clip_from_encode_tag_in_efg() {
+        let clip_url = media_url_with_encode_tag(
+            "xpv_progressive.INSTAGRAM.CLIPS.C3.720.dash_baseline_1_v1",
+            false,
+        );
+        assert!(legacy_media_url_is_clip(&clip_url));
+
+        // Still detected when the padding comes url-encoded (`%3D`), as in the XML.
+        let clip_url_encoded = media_url_with_encode_tag(
+            "xpv_progressive.INSTAGRAM.CLIPS.C3.720.dash_baseline_1_v1",
+            true,
+        );
+        assert!(legacy_media_url_is_clip(&clip_url_encoded));
+    }
+
+    #[test]
+    fn feed_and_story_videos_are_not_clips() {
+        let feed_url = media_url_with_encode_tag(
+            "xpv_progressive.INSTAGRAM.FEED.C3.720.dash_baseline_1_v1",
+            false,
+        );
+        assert!(!legacy_media_url_is_clip(&feed_url));
+
+        let story_url = media_url_with_encode_tag("xpv_progressive.INSTAGRAM.STORY.C3.720", false);
+        assert!(!legacy_media_url_is_clip(&story_url));
+
+        // Images have no `efg`.
+        assert!(!legacy_media_url_is_clip(
+            "https://instagram.example/652760881_n.jpg?stp=dst-jpg&_nc_cat=1"
+        ));
+    }
+
+    #[test]
+    fn clip_url_reclassifies_p_permalink_as_reels() {
+        // The core SCrawler case: reel stored with a `/p/<code>/` permalink
+        // (not `/reel/`). Without the URL signal it would fall into `timeline`.
+        let clip_url = media_url_with_encode_tag(
+            "xpv_progressive.INSTAGRAM.CLIPS.C3.720.dash_baseline_1_v1",
+            false,
+        );
+        assert_eq!(
+            infer_legacy_instagram_media_section(
+                None,
+                "https://www.instagram.com/p/C_3zLt7PsrI/",
+                Some(&clip_url),
+            ),
+            "reels"
+        );
+    }
+
+    #[test]
+    fn feed_video_with_p_permalink_stays_timeline() {
+        let feed_url = media_url_with_encode_tag(
+            "xpv_progressive.INSTAGRAM.FEED.C3.720.dash_baseline_1_v1",
+            false,
+        );
+        assert_eq!(
+            infer_legacy_instagram_media_section(
+                None,
+                "https://www.instagram.com/p/DLGaeghuNLN/",
+                Some(&feed_url),
+            ),
+            "timeline"
+        );
+    }
+
+    #[test]
+    fn reel_permalink_still_wins_without_url() {
+        assert_eq!(
+            infer_legacy_instagram_media_section(
+                None,
+                "https://www.instagram.com/nynf4_/reel/DPkG4KtjqN6",
+                None,
+            ),
+            "reels"
+        );
+    }
+
+    #[test]
+    fn highlight_folder_keeps_precedence_over_clip_url() {
+        // A reel saved inside a highlight stays `stories` (highlight); it must
+        // not be downgraded to `reels` by the URL signal.
+        let clip_url = media_url_with_encode_tag(
+            "xpv_progressive.INSTAGRAM.CLIPS.C3.720.dash_baseline_1_v1",
+            false,
+        );
+        assert_eq!(
+            infer_legacy_instagram_media_section(
+                Some("Stories/Outfit yes"),
+                "https://www.instagram.com/p/C_3zLt7PsrI/",
+                Some(&clip_url),
+            ),
+            "stories"
+        );
     }
 }
