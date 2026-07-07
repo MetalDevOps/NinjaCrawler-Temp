@@ -149,7 +149,26 @@ pub struct TikTokConnectorResult {
     /// parou de listar posts, mas um post conhecido resolveu para outro
     /// `uniqueId` com o mesmo `author.id`). O chamador atualiza o perfil.
     pub resolved_handle: Option<String>,
+    /// `true` quando o perfil não pôde ser resolvido (inexistente, desativado ou
+    /// banido) e nenhum handle novo foi recuperado. O chamador transforma isto
+    /// num problema de sync "perfil indisponível".
+    pub profile_unavailable: bool,
+    /// `true` quando o perfil existe mas é privado e a conta autenticada não o
+    /// segue (não há mídia acessível). O chamador marca "perfil privado".
+    pub profile_private: bool,
     pub manifest_summary: TikTokManifestSummary,
+}
+
+/// Classificação de um perfil cujo listing não resolveu o dono, obtida pela
+/// embed page (`/embed/@handle`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProfileProbeStatus {
+    /// Perfil público resolvido (o listing falhou por motivo transiente).
+    Available,
+    /// Conta privada não seguida (embed `errorCode` 10222).
+    Private,
+    /// Conta inexistente/banida (embed `errorCode` 10221) ou probe inconclusivo.
+    Unavailable,
 }
 
 pub struct TikTokProgress {
@@ -231,6 +250,8 @@ where
             resolved_avatar_url: None,
             duplicate_user_id: None,
             resolved_handle: None,
+            profile_unavailable: false,
+            profile_private: false,
             manifest_summary: summary,
         });
     }
@@ -323,6 +344,38 @@ where
                 }
             }
         }
+    }
+
+    // Listing vazio: nenhum post foi enumerado. Não recuperamos um handle novo
+    // (renomeação) nem detectamos duplicata, então o perfil pode estar
+    // indisponível (inexistente/banido), privado (não seguido) ou apenas ser um
+    // perfil público sem posts. A embed page distingue os três — o listing não,
+    // porque com a conta autenticada um perfil privado resolve o `secUid` e
+    // apenas lista zero posts, sem emitir erro. Marcamos a fonte adequadamente
+    // em vez de reportar um sync bem-sucedido com zero posts.
+    let mut profile_unavailable = false;
+    let mut profile_private = false;
+    if resolved_handle.is_none()
+        && duplicate_user_id.is_none()
+        && listed
+            .as_ref()
+            .is_some_and(|value| value.posts.is_empty() && !value.rate_limited)
+    {
+        if is_cancelled() {
+            return Err("source sync cancelled by user".to_string());
+        }
+        match probe_profile_status(request, &handle) {
+            // Listing falhou por motivo transiente; o perfil é público válido.
+            ProfileProbeStatus::Available => {}
+            ProfileProbeStatus::Private => profile_private = true,
+            ProfileProbeStatus::Unavailable => profile_unavailable = true,
+        }
+        connector_debug::append_current(
+            "internal.tiktok",
+            "system",
+            "profile.probe",
+            format!("handle={handle}\nprivate={profile_private}\nunavailable={profile_unavailable}"),
+        );
     }
 
     // Avatar: o yt-dlp não expõe a foto do canal, então buscamos a página de um
@@ -640,6 +693,8 @@ where
         resolved_avatar_url,
         duplicate_user_id,
         resolved_handle,
+        profile_unavailable,
+        profile_private,
         manifest_summary: summary,
     })
 }
@@ -1825,6 +1880,55 @@ fn output_is_rate_limited(text: &str) -> bool {
     lowered.contains("429") || lowered.contains("rate limit") || lowered.contains("rate-limit")
 }
 
+/// Quando o listing não resolve o dono, distingue "perfil privado" de
+/// "indisponível" buscando a embed page (`/embed/@handle`). Ao contrário da
+/// página normal do perfil (que devolve só o desafio WAF), a embed entrega o
+/// estado no `__FRONTITY_CONNECT_STATE__` mesmo com HTTP 400, e o CDN aceita um
+/// GET simples (sem impersonation de TLS). Best-effort: qualquer falha de rede
+/// é tratada como indisponível (o listing já havia falhado em resolver o dono).
+fn probe_profile_status(request: &TikTokConnectorRequest, handle: &str) -> ProfileProbeStatus {
+    let client = match build_download_client(request) {
+        Ok(client) => client,
+        Err(_) => return ProfileProbeStatus::Unavailable,
+    };
+    let url = format!("https://www.tiktok.com/embed/@{handle}");
+    connector_debug::append_current("tiktok-http", "call", "GET embed", format!("GET {url}"));
+    let body = match client.get(&url).send().and_then(|response| response.text()) {
+        Ok(body) => body,
+        Err(error) => {
+            connector_debug::append_current(
+                "tiktok-http",
+                "error",
+                "GET embed",
+                error.to_string(),
+            );
+            return ProfileProbeStatus::Unavailable;
+        }
+    };
+    classify_embed_profile_status(&body)
+}
+
+/// Classifica o corpo da embed page. Os `errorCode` do TikTok distinguem os
+/// casos: `10222` = conta privada; `10221` = conta inexistente/banida. Um perfil
+/// público resolvido responde 200 e traz `"privateAccount":false` no objeto do
+/// dono. Qualquer outra coisa é inconclusiva → tratamos como indisponível, já
+/// que o listing não conseguiu resolver o perfil.
+fn classify_embed_profile_status(body: &str) -> ProfileProbeStatus {
+    if body.contains("\"errorCode\":10222") {
+        return ProfileProbeStatus::Private;
+    }
+    if body.contains("\"errorCode\":10221") {
+        return ProfileProbeStatus::Unavailable;
+    }
+    if body.contains("\"privateAccount\":true") {
+        return ProfileProbeStatus::Private;
+    }
+    if body.contains("\"privateAccount\":false") {
+        return ProfileProbeStatus::Available;
+    }
+    ProfileProbeStatus::Unavailable
+}
+
 fn timestamped_file_name(captured_at_timestamp: Option<i64>, raw_file_name: &str) -> String {
     match captured_at_timestamp.and_then(|value| Local.timestamp_opt(value, 0).single()) {
         Some(local_time) => {
@@ -1865,6 +1969,34 @@ mod tests {
         assert!(output_is_rate_limited("HTTP Error 429: Too Many Requests"));
         assert!(output_is_rate_limited("rate-limit reached"));
         assert!(!output_is_rate_limited("downloaded 10 files"));
+    }
+
+    #[test]
+    fn classify_embed_profile_status_distinguishes_cases() {
+        // Trechos reais do `__FRONTITY_CONNECT_STATE__` da embed page.
+        let private_body =
+            r#"...,"errorCode":10222,"errorStatus":400,"isError":true,"pageName":"error","userInfo":{"uniqueId":"y.yral"}}..."#;
+        let unavailable_body =
+            r#"...,"errorCode":10221,"errorStatus":400,"isError":true,"pageName":"error","userInfo":{"uniqueId":"renataa.sts"}}..."#;
+        let public_body =
+            r#"...,"uniqueId":"tiktok","verified":true,"followerCount":94700000,"privateAccount":false,..."#;
+        assert!(matches!(
+            classify_embed_profile_status(private_body),
+            ProfileProbeStatus::Private
+        ));
+        assert!(matches!(
+            classify_embed_profile_status(unavailable_body),
+            ProfileProbeStatus::Unavailable
+        ));
+        assert!(matches!(
+            classify_embed_profile_status(public_body),
+            ProfileProbeStatus::Available
+        ));
+        // Corpo sem sinais úteis (ex.: página de bloqueio): inconclusivo.
+        assert!(matches!(
+            classify_embed_profile_status("<html>Please wait...</html>"),
+            ProfileProbeStatus::Unavailable
+        ));
     }
 
     #[test]

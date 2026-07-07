@@ -513,6 +513,36 @@ where
             as u32;
         progress.legacy_records_matched = result.legacy_records_matched;
         on_progress(progress.clone());
+
+        // Recategorize in the sync ledger (the source of truth for Profile View
+        // and sync dedupe) the media/posts whose `media_section` was recomputed
+        // by the legacy inference — chiefly SCrawler reels previously marked as
+        // `timeline` because their permalink was `/p/` instead of `/reel/`. The
+        // upserts do `DO UPDATE`, so they reclassify existing rows without
+        // duplicating, reusing the already-collected records (no extra hash/IO).
+        if !legacy_by_key.is_empty() {
+            let legacy_records = legacy_by_key.values().cloned().collect::<Vec<_>>();
+            let downloaded_media =
+                legacy_reconciliation_records_to_downloaded_media(&legacy_records);
+            let observed_posts = legacy_reconciliation_records_to_observed_posts(&legacy_records);
+            upsert_instagram_media_ledger_entries(
+                connection,
+                &source.id,
+                account_id,
+                &source.handle,
+                &profile_root,
+                &downloaded_media,
+                &now,
+            )?;
+            upsert_instagram_post_ledger_entries(
+                connection,
+                &source.id,
+                account_id,
+                &source.handle,
+                &observed_posts,
+                &now,
+            )?;
+        }
     }
 
     upsert_app_setting_value(
