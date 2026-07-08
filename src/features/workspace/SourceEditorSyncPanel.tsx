@@ -521,7 +521,7 @@ function TikTokSyncPanel({ tiktokSyncOptions, localDateFormat, onTikTokSyncOptio
               checked={tiktokSyncOptions.collectMediaStats !== false}
               label="Collect media stats"
               onChange={(checked) => updateTikTokOption(onTikTokSyncOptionsChange, 'collectMediaStats', checked)}
-              tooltip="Store views, likes, comments, and shares reported by TikTok for newly downloaded media. To re-collect stats for media you already have, use 'Refresh media stats' in the profile's context menu or in the Profile View toolbar."
+              tooltip="Store views, likes, comments, and shares reported by TikTok for newly downloaded media. To re-collect stats for media you already have, use 'Refresh stats' in the Profile View header."
             />
           </SyncGroupCard>
 

@@ -36,6 +36,10 @@ export interface MediaCardProps {
 
 const TRASH_PATH =
   'M9 3h6m-9 3h12M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14M10 10v7M14 10v7'
+const EXTERNAL_PATH =
+  'M14 4h6v6M20 4l-9 9M12 6H7a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3h8a3 3 0 0 0 3-3v-5'
+const FOLDER_PATH =
+  'M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5v-9Z'
 
 export function MediaCard({
   posterAbsPath,
@@ -111,9 +115,19 @@ export function MediaCard({
                 disabled={onlineDisabled}
                 onClick={onOnline}
                 type="button"
+                aria-label="Online"
                 title={onlineTitle ?? 'Open original online'}
               >
-                Online
+                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                  <path
+                    d={EXTERNAL_PATH}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
               </button>
             )}
             {onReveal ? (
@@ -121,9 +135,19 @@ export function MediaCard({
                 className="ghost-button queue-icon-button"
                 onClick={onReveal}
                 type="button"
+                aria-label="Folder"
                 title="Reveal in folder"
               >
-                Folder
+                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                  <path
+                    d={FOLDER_PATH}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
               </button>
             ) : null}
           </div>

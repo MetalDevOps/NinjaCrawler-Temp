@@ -11,7 +11,6 @@ import {
   openMediaFile,
   revealMediaInFolder,
   runSourceSync,
-  subscribeToProfileViewSource,
   subscribeToSourceSyncQueue,
 } from '../../bridge/desktop'
 import { DEFAULT_PROVIDER_CATALOG } from '../../domain/defaults'
@@ -281,7 +280,7 @@ type VirtualRow =
   | { type: 'grid'; key: string; posts: MediaGalleryPost[] }
 
 export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
-  const [sourceId, setSourceId] = useState<string | undefined>(initialSourceId)
+  const [sourceId] = useState<string | undefined>(initialSourceId)
   const [gallery, setGallery] = useState<SourceMediaGallery>()
   const [avatarPath, setAvatarPath] = useState<string>()
   const [loading, setLoading] = useState(false)
@@ -377,17 +376,6 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   useEffect(() => {
     if (likesSearchOpen) likesSearchInputRef.current?.focus()
   }, [likesSearchOpen])
-
-  // Reabrir a janela para outro perfil emite o novo sourceId.
-  useEffect(() => {
-    let unsubscribe: (() => void) | undefined
-    void subscribeToProfileViewSource((nextSourceId) => setSourceId(nextSourceId))
-      .then((teardown) => {
-        unsubscribe = teardown
-      })
-      .catch(() => undefined)
-    return () => unsubscribe?.()
-  }, [])
 
   const load = useCallback(async (id: string) => {
     setLoading(true)
@@ -805,33 +793,66 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   const deleteActivePostRef = useRef(deleteActivePost)
   deleteActivePostRef.current = deleteActivePost
 
-  // Teclado no lightbox (captura para ter prioridade sobre o Escape global).
+  // Atalho destrutivo próprio do Profile View; navegação/seek ficam no
+  // MediaLightbox compartilhado.
   const lightboxOpen = lightboxIndex !== undefined
   const lightboxOpenRef = useRef(lightboxOpen)
   lightboxOpenRef.current = lightboxOpen
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (!lightboxOpenRef.current) return
-      if (event.key === 'Escape') {
-        event.stopImmediatePropagation()
-        closeLightbox()
-      } else if (event.key === 'ArrowLeft') {
-        stepLightbox(-1)
-      } else if (event.key === 'ArrowRight') {
-        stepLightbox(1)
-      } else if (event.key === 'Delete' && event.shiftKey) {
+      if (event.key === 'Delete' && event.shiftKey) {
         event.preventDefault()
+        event.stopImmediatePropagation()
         void deleteActivePostRef.current()
       }
     }
     document.addEventListener('keydown', handler, true)
     return () => document.removeEventListener('keydown', handler, true)
-  }, [closeLightbox, stepLightbox])
+  }, [])
+
+  const handleActionError = useCallback((action: string, actionError: unknown) => {
+    const message = actionError instanceof Error ? actionError.message : String(actionError)
+    setError(`${action} failed. ${message}`)
+  }, [])
 
   const handleOpenOnline = useCallback((post: MediaGalleryPost, fallbackUrl?: string) => {
     const url = post.postUrl ?? fallbackUrl
-    if (url) void openExternalTarget(url)
-  }, [])
+    if (url) void openExternalTarget(url).catch((actionError) => handleActionError('Open online', actionError))
+  }, [handleActionError])
+
+  const handleOpenProfileOnline = useCallback(() => {
+    const url = gallery?.profileUrl
+    if (url) {
+      void openExternalTarget(url).catch((actionError) => handleActionError('Open profile online', actionError))
+    }
+  }, [gallery?.profileUrl, handleActionError])
+
+  const handleOpenMediaFile = useCallback((path: string) => {
+    void openMediaFile(path).catch((actionError) => handleActionError('Open file', actionError))
+  }, [handleActionError])
+
+  const handleRevealMedia = useCallback((path: string) => {
+    void revealMediaInFolder(path).catch((actionError) => handleActionError('Reveal in folder', actionError))
+  }, [handleActionError])
+
+  const handleRefreshMediaStats = useCallback(() => {
+    if (!sourceId || statsRefreshState === 'queueing') return
+    setStatsRefreshState('queueing')
+    runSourceSync(sourceId, {
+      trigger: 'manual_stats_refresh',
+      runMode: 'refresh_media_stats',
+    })
+      .then(() => {
+        setStatsRefreshState('queued')
+        window.setTimeout(() => setStatsRefreshState('idle'), 4000)
+      })
+      .catch((refreshError) => {
+        setStatsRefreshState('idle')
+        const message = refreshError instanceof Error ? refreshError.message : String(refreshError)
+        window.alert(`Failed to queue the media stats refresh.\n${message}`)
+      })
+  }, [sourceId, statsRefreshState])
 
   // Sai do modo seleção / limpa ao trocar de perfil ou de filtro. A busca por
   // autor também é zerada (ela só existe na aba Likes).
@@ -918,6 +939,21 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     '--pv-thumb-min': `${DENSITY_STEPS[densityIndex]}px`,
     '--pv-cols': gridMetrics.cols,
   } as CSSProperties
+  const sortFieldLabel =
+    effectiveSortField === 'popularity'
+      ? 'Popularity'
+      : effectiveSortField === 'download'
+        ? 'Download'
+        : 'Creation'
+  const sortDirectionLabel =
+    effectiveSortField === 'popularity'
+      ? sortDir === 'newest'
+        ? 'Most viewed'
+        : 'Least viewed'
+      : sortDir === 'newest'
+        ? 'Newest'
+        : 'Oldest'
+  const sortControlLabel = `${sortFieldLabel}: ${sortDirectionLabel}`
 
   const renderCard = (post: MediaGalleryPost, key: string) => {
     const thumb = post.files[0]
@@ -977,7 +1013,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
           post.postUrl ? 'Open original post online' : 'Original link unavailable — open profile'
         }
         onOnline={() => handleOpenOnline(post, gallery?.profileUrl)}
-        onReveal={() => void revealMediaInFolder(thumb.absolutePath)}
+        onReveal={() => handleRevealMedia(thumb.absolutePath)}
         onDelete={() => setConfirmPosts([post])}
       />
     )
@@ -1012,11 +1048,38 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
             ) : null}
           </p>
         </div>
-        {gallery?.profileUrl ? (
-          <button className="ghost-button" onClick={() => void openExternalTarget(gallery.profileUrl)} type="button">
-            Open profile online
-          </button>
-        ) : null}
+        <div className="profile-view-header-actions">
+          {popularitySortAvailable && sourceId ? (
+            <button
+              className={`ghost-button profile-view-header-action profile-view-stats-refresh is-${statsRefreshState}`}
+              disabled={statsRefreshState === 'queueing'}
+              onClick={handleRefreshMediaStats}
+              type="button"
+              aria-label="Refresh media stats"
+              title={
+                statsRefreshState === 'queued'
+                  ? 'Media stats refresh queued'
+                  : 'Refresh media stats (views, likes, comments, shares) for downloaded media'
+              }
+            >
+              {statsRefreshState === 'queued' ? (
+                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                  <path d="M5 12.5 10 17.5 19 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                  <path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+              <span>{statsRefreshState === 'queueing' ? 'Queueing…' : statsRefreshState === 'queued' ? 'Queued' : 'Refresh stats'}</span>
+            </button>
+          ) : null}
+          {gallery?.profileUrl ? (
+            <button className="ghost-button profile-view-header-action" onClick={handleOpenProfileOnline} type="button">
+              Open profile online
+            </button>
+          ) : null}
+        </div>
       </header>
 
       {hasMedia ? (
@@ -1067,109 +1130,112 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
             </>
           ) : (
             <>
-              <div className="profile-view-segmented" role="group" aria-label="View mode">
-                {isHighlights ? (
-                  // Nos Highlights o controle alterna o agrupamento por álbum
-                  // (padrão) com as formas comuns — preferência própria, persistida.
-                  <>
-                    <button
-                      className={highlightsMode === 'album' ? 'is-active' : ''}
-                      onClick={() => setHighlightsMode('album')}
-                      type="button"
-                      aria-pressed={highlightsMode === 'album'}
-                    >
-                      By album
-                    </button>
-                    <button
-                      className={highlightsMode === 'day' ? 'is-active' : ''}
-                      onClick={() => setHighlightsMode('day')}
-                      type="button"
-                      aria-pressed={highlightsMode === 'day'}
-                    >
-                      By day
-                    </button>
-                    <button
-                      className={highlightsMode === 'grid' ? 'is-active' : ''}
-                      onClick={() => setHighlightsMode('grid')}
-                      type="button"
-                      aria-pressed={highlightsMode === 'grid'}
-                    >
-                      All media
-                    </button>
-                  </>
-                ) : isAuthorTab ? (
-                  // Likes/Favorites: agrupamento por autor disponível (padrão),
-                  // preferência própria — não mexe no modo das outras abas.
-                  <>
-                    <button
-                      className={likesMode === 'user' ? 'is-active' : ''}
-                      onClick={() => setLikesMode('user')}
-                      type="button"
-                      aria-pressed={likesMode === 'user'}
-                    >
-                      By user
-                    </button>
-                    <button
-                      className={likesMode === 'day' ? 'is-active' : ''}
-                      onClick={() => setLikesMode('day')}
-                      type="button"
-                      aria-pressed={likesMode === 'day'}
-                    >
-                      By day
-                    </button>
-                    <button
-                      className={likesMode === 'grid' ? 'is-active' : ''}
-                      onClick={() => setLikesMode('grid')}
-                      type="button"
-                      aria-pressed={likesMode === 'grid'}
-                    >
-                      All media
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      className={viewMode === 'day' ? 'is-active' : ''}
-                      onClick={() => setViewMode('day')}
-                      type="button"
-                      aria-pressed={viewMode === 'day'}
-                    >
-                      By day
-                    </button>
-                    <button
-                      className={viewMode === 'grid' ? 'is-active' : ''}
-                      onClick={() => setViewMode('grid')}
-                      type="button"
-                      aria-pressed={viewMode === 'grid'}
-                    >
-                      All media
-                    </button>
-                  </>
-                )}
-              </div>
-              {sections.length > 1 ? (
-                <div className="profile-view-sections" role="group" aria-label="Section filter">
-                  <button
-                    className={sectionFilter === SECTION_FILTER_ALL ? 'is-active' : ''}
-                    onClick={() => setSectionFilter(SECTION_FILTER_ALL)}
-                    type="button"
-                    aria-pressed={sectionFilter === SECTION_FILTER_ALL}
-                  >
-                    All
-                  </button>
-                  {sections.map((section) => (
-                    <button
-                      key={section}
-                      className={sectionFilter === section ? 'is-active' : ''}
-                      onClick={() => setSectionFilter(section)}
-                      type="button"
-                      aria-pressed={sectionFilter === section}
-                    >
-                      {gallery ? sectionLabel(gallery.provider, section) : section}
-                    </button>
-                  ))}
+              <div className="profile-view-toolbar-primary">
+                <div className="profile-view-segmented" role="group" aria-label="View mode">
+                  {isHighlights ? (
+                    // Nos Highlights o controle alterna o agrupamento por álbum
+                    // (padrão) com as formas comuns — preferência própria, persistida.
+                    <>
+                      <button
+                        className={highlightsMode === 'album' ? 'is-active' : ''}
+                        onClick={() => setHighlightsMode('album')}
+                        type="button"
+                        aria-pressed={highlightsMode === 'album'}
+                      >
+                        By album
+                      </button>
+                      <button
+                        className={highlightsMode === 'day' ? 'is-active' : ''}
+                        onClick={() => setHighlightsMode('day')}
+                        type="button"
+                        aria-pressed={highlightsMode === 'day'}
+                      >
+                        By day
+                      </button>
+                      <button
+                        className={highlightsMode === 'grid' ? 'is-active' : ''}
+                        onClick={() => setHighlightsMode('grid')}
+                        type="button"
+                        aria-pressed={highlightsMode === 'grid'}
+                      >
+                        All media
+                      </button>
+                    </>
+                  ) : isAuthorTab ? (
+                    // Likes/Favorites: agrupamento por autor disponível (padrão),
+                    // preferência própria — não mexe no modo das outras abas.
+                    <>
+                      <button
+                        className={likesMode === 'user' ? 'is-active' : ''}
+                        onClick={() => setLikesMode('user')}
+                        type="button"
+                        aria-pressed={likesMode === 'user'}
+                      >
+                        By user
+                      </button>
+                      <button
+                        className={likesMode === 'day' ? 'is-active' : ''}
+                        onClick={() => setLikesMode('day')}
+                        type="button"
+                        aria-pressed={likesMode === 'day'}
+                      >
+                        By day
+                      </button>
+                      <button
+                        className={likesMode === 'grid' ? 'is-active' : ''}
+                        onClick={() => setLikesMode('grid')}
+                        type="button"
+                        aria-pressed={likesMode === 'grid'}
+                      >
+                        All media
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        className={viewMode === 'day' ? 'is-active' : ''}
+                        onClick={() => setViewMode('day')}
+                        type="button"
+                        aria-pressed={viewMode === 'day'}
+                      >
+                        By day
+                      </button>
+                      <button
+                        className={viewMode === 'grid' ? 'is-active' : ''}
+                        onClick={() => setViewMode('grid')}
+                        type="button"
+                        aria-pressed={viewMode === 'grid'}
+                      >
+                        All media
+                      </button>
+                    </>
+                  )}
                 </div>
-              ) : null}
+                {sections.length > 1 ? (
+                  <div className="profile-view-sections" role="group" aria-label="Section filter">
+                    <button
+                      className={sectionFilter === SECTION_FILTER_ALL ? 'is-active' : ''}
+                      onClick={() => setSectionFilter(SECTION_FILTER_ALL)}
+                      type="button"
+                      aria-pressed={sectionFilter === SECTION_FILTER_ALL}
+                    >
+                      All
+                    </button>
+                    {sections.map((section) => (
+                      <button
+                        key={section}
+                        className={sectionFilter === section ? 'is-active' : ''}
+                        onClick={() => setSectionFilter(section)}
+                        type="button"
+                        aria-pressed={sectionFilter === section}
+                      >
+                        {gallery ? sectionLabel(gallery.provider, section) : section}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+              <div className="profile-view-toolbar-actions">
               {isAuthorSection(sectionFilter) ? (
                 <div className={`profile-view-search${likesSearchOpen ? ' is-open' : ''}`}>
                   {likesSearchOpen ? (
@@ -1229,53 +1295,15 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   )}
                 </div>
               ) : null}
-              {popularitySortAvailable && sourceId ? (
-                <button
-                  className="ghost-button queue-icon-button profile-view-stats-refresh"
-                  disabled={statsRefreshState === 'queueing'}
-                  onClick={() => {
-                    if (statsRefreshState === 'queueing') return
-                    setStatsRefreshState('queueing')
-                    runSourceSync(sourceId, {
-                      trigger: 'manual_stats_refresh',
-                      runMode: 'refresh_media_stats',
-                    })
-                      .then(() => {
-                        setStatsRefreshState('queued')
-                        window.setTimeout(() => setStatsRefreshState('idle'), 4000)
-                      })
-                      .catch((refreshError) => {
-                        setStatsRefreshState('idle')
-                        const message = refreshError instanceof Error ? refreshError.message : String(refreshError)
-                        window.alert(`Failed to queue the media stats refresh.\n${message}`)
-                      })
-                  }}
-                  type="button"
-                  aria-label="Refresh media stats"
-                  title={statsRefreshState === 'queued'
-                    ? 'Media stats refresh queued'
-                    : 'Refresh media stats (views, likes, comments, shares) for downloaded media'}
-                >
-                  {statsRefreshState === 'queued' ? (
-                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
-                      <path d="M5 12.5 10 17.5 19 7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  ) : (
-                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
-                      <path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  )}
-                </button>
-              ) : null}
               <div className="profile-view-sort" ref={sortMenuRef}>
                 <button
-                  className="ghost-button queue-icon-button profile-view-sort-toggle"
+                  className="ghost-button profile-view-sort-toggle"
                   onClick={() => setSortMenuOpen((open) => !open)}
                   type="button"
                   aria-haspopup="menu"
                   aria-expanded={sortMenuOpen}
                   aria-label="Sort order"
-                  title="Sort order"
+                  title={`Sort order: ${sortControlLabel}`}
                 >
                   <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
                     <path
@@ -1287,6 +1315,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                       strokeLinejoin="round"
                     />
                   </svg>
+                  <span>{sortControlLabel}</span>
                 </button>
                 {sortMenuOpen ? (
                   <div className="profile-view-sort-menu" role="menu">
@@ -1387,6 +1416,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
               >
                 Select
               </button>
+              </div>
             </>
           )}
         </div>
@@ -1407,8 +1437,10 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   <span className="profile-view-album-cover" aria-hidden="true">
                     {album.coverSrc ? <img src={album.coverSrc} alt="" loading="lazy" /> : null}
                   </span>
-                  <span className="eyebrow profile-view-album-title">{album.label}</span>
-                  <span className="pill">{album.posts.length}</span>
+                  <span className="profile-view-day-title">
+                    <span className="eyebrow profile-view-album-title">{album.label}</span>
+                    <span className="pill">{album.posts.length}</span>
+                  </span>
                 </div>
                 <div className="profile-view-grid" style={gridStyle}>
                   {album.posts.map((post, index) => renderCard(post, post.postId ?? `${album.key}-${index}`))}
@@ -1435,10 +1467,12 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
                   >
                     {row.type === 'header' ? (
                       <div className="profile-view-day-header">
-                        <span className={row.plain ? 'eyebrow profile-view-user-title' : 'eyebrow'}>
-                          {row.label}
+                        <span className="profile-view-day-title">
+                          <span className={row.plain ? 'eyebrow profile-view-user-title' : 'eyebrow'}>
+                            {row.label}
+                          </span>
+                          <span className="pill">{row.count}</span>
                         </span>
-                        <span className="pill">{row.count}</span>
                       </div>
                     ) : (
                       <div className="profile-view-grid profile-view-grid-virtual" style={virtualGridStyle}>
@@ -1522,14 +1556,14 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
               )}
               <button
                 className="ghost-button"
-                onClick={() => void openMediaFile(activeItem.file.absolutePath)}
+                onClick={() => handleOpenMediaFile(activeItem.file.absolutePath)}
                 type="button"
               >
                 Open file
               </button>
               <button
                 className="ghost-button"
-                onClick={() => void revealMediaInFolder(activeItem.file.absolutePath)}
+                onClick={() => handleRevealMedia(activeItem.file.absolutePath)}
                 type="button"
               >
                 Reveal in folder

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 
@@ -22,6 +23,14 @@ export interface MediaLightboxProps {
   actions?: ReactNode
 }
 
+const VIDEO_SEEK_SECONDS = 1
+
+function isInteractiveKeyTarget(target: EventTarget | null, root: HTMLElement | null): boolean {
+  if (!(target instanceof Element)) return false
+  const interactive = target.closest('button, input, textarea, select, a[href], [contenteditable="true"]')
+  return Boolean(interactive && root?.contains(interactive))
+}
+
 export function MediaLightbox({
   fileAbsPath,
   isVideo,
@@ -34,8 +43,78 @@ export function MediaLightbox({
   audioAbsPath,
   actions,
 }: MediaLightboxProps) {
+  const lightboxRef = useRef<HTMLDivElement>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
+
+  useEffect(() => {
+    lightboxRef.current?.focus()
+  }, [])
+
+  useEffect(() => {
+    const seekVideo = (delta: number) => {
+      const video = videoRef.current
+      if (!video) return false
+      const duration = video.duration
+      const nextTime = video.currentTime + delta
+      video.currentTime = Number.isFinite(duration)
+        ? Math.min(Math.max(0, nextTime), duration)
+        : Math.max(0, nextTime)
+      return true
+    }
+
+    const toggleFullscreen = () => {
+      const video = videoRef.current
+      if (!video) return false
+      if (document.fullscreenElement === video) {
+        const exitFullscreen = document.exitFullscreen?.()
+        void exitFullscreen?.catch(() => undefined)
+      } else {
+        const requestFullscreen = video.requestFullscreen?.()
+        void requestFullscreen?.catch(() => undefined)
+      }
+      return true
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (isInteractiveKeyTarget(event.target, lightboxRef.current)) return
+
+      let handled = false
+      if (event.key === 'Escape') {
+        onClose()
+        handled = true
+      } else if (event.key === 'ArrowDown') {
+        if (hasNext) onNext()
+        handled = true
+      } else if (event.key === 'ArrowUp') {
+        if (hasPrev) onPrev()
+        handled = true
+      } else if (event.key === 'ArrowRight' && isVideo) {
+        handled = seekVideo(VIDEO_SEEK_SECONDS)
+      } else if (event.key === 'ArrowLeft' && isVideo) {
+        handled = seekVideo(-VIDEO_SEEK_SECONDS)
+      } else if (event.key === 'Enter' && isVideo) {
+        handled = toggleFullscreen()
+      }
+
+      if (handled) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown, true)
+    return () => document.removeEventListener('keydown', handleKeyDown, true)
+  }, [hasNext, hasPrev, isVideo, onClose, onNext, onPrev])
+
   return (
-    <div className="profile-view-lightbox" role="dialog" aria-modal="true" onClick={onClose}>
+    <div
+      className="profile-view-lightbox"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+      ref={lightboxRef}
+      tabIndex={-1}
+    >
       <button className="profile-view-lightbox-close" onClick={onClose} type="button" aria-label="Close">
         ✕
       </button>
@@ -56,7 +135,7 @@ export function MediaLightbox({
         {title ? <div className="profile-view-lightbox-title">{title}</div> : null}
         {isVideo ? (
           // TikTok-style: o vídeo repete sozinho ao terminar.
-          <video src={convertFileSrc(fileAbsPath)} controls autoPlay loop />
+          <video ref={videoRef} src={convertFileSrc(fileAbsPath)} controls autoPlay loop />
         ) : (
           <img src={convertFileSrc(fileAbsPath)} alt="" />
         )}

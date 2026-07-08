@@ -13,6 +13,7 @@ const bridgeMocks = vi.hoisted(() => ({
   openExternalTarget: vi.fn(),
   openMediaFile: vi.fn(),
   revealMediaInFolder: vi.fn(),
+  runSourceSync: vi.fn(),
   subscribeToProfileViewSource: vi.fn(),
   subscribeToSourceSyncQueue: vi.fn(),
 }))
@@ -152,6 +153,9 @@ describe('ProfileViewPage', () => {
     bridgeMocks.subscribeToProfileViewSource.mockResolvedValue(() => undefined)
     bridgeMocks.subscribeToSourceSyncQueue.mockResolvedValue(() => undefined)
     bridgeMocks.openExternalTarget.mockResolvedValue(undefined)
+    bridgeMocks.openMediaFile.mockResolvedValue(undefined)
+    bridgeMocks.revealMediaInFolder.mockResolvedValue(undefined)
+    bridgeMocks.runSourceSync.mockResolvedValue(undefined)
   })
 
   afterEach(() => cleanup())
@@ -174,6 +178,27 @@ describe('ProfileViewPage', () => {
       expect(bridgeMocks.openExternalTarget).toHaveBeenCalledWith(
         'https://www.tiktok.com/@gaaby.tls/video/7624199329925958920',
       )
+    })
+  })
+
+  it('reveals the media folder from the card action', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    const folderButtons = await screen.findAllByRole('button', { name: 'Folder' })
+
+    fireEvent.click(folderButtons[0])
+
+    await waitFor(() => {
+      expect(bridgeMocks.revealMediaInFolder).toHaveBeenCalledWith('S:/x/a.mp4')
+    })
+  })
+
+  it('opens the profile link from the header', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+
+    fireEvent.click(await screen.findByRole('button', { name: /open profile online/i }))
+
+    await waitFor(() => {
+      expect(bridgeMocks.openExternalTarget).toHaveBeenCalledWith('https://www.tiktok.com/gaaby.tls')
     })
   })
 
@@ -259,6 +284,42 @@ describe('ProfileViewPage', () => {
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByRole('button', { name: /open online/i })).toBeTruthy()
     expect(within(dialog).getByRole('button', { name: /reveal in folder/i })).toBeTruthy()
+  })
+
+  it('runs lightbox online, open file, and reveal actions through the bridge', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    const thumbs = await screen.findAllByRole('button', { name: /open preview/i })
+    fireEvent.click(thumbs[0])
+    const dialog = await screen.findByRole('dialog')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /open online/i }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /open file/i }))
+    fireEvent.click(within(dialog).getByRole('button', { name: /reveal in folder/i }))
+
+    await waitFor(() => {
+      expect(bridgeMocks.openExternalTarget).toHaveBeenCalledWith(
+        'https://www.tiktok.com/@gaaby.tls/video/7624199329925958920',
+      )
+      expect(bridgeMocks.openMediaFile).toHaveBeenCalledWith('S:/x/a.mp4')
+      expect(bridgeMocks.revealMediaInFolder).toHaveBeenCalledWith('S:/x/a.mp4')
+    })
+  })
+
+  it('keeps horizontal arrows for video seeking instead of Profile View navigation', async () => {
+    render(<ProfileViewPage initialSourceId="src-1" />)
+    const thumbs = await screen.findAllByRole('button', { name: /open preview/i })
+    fireEvent.click(thumbs[0])
+    const dialog = await screen.findByRole('dialog')
+
+    fireEvent.keyDown(document, { key: 'ArrowRight' })
+
+    expect(within(dialog).getByRole('button', { name: /open online/i })).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: /open online/i }))
+    await waitFor(() => {
+      expect(bridgeMocks.openExternalTarget).toHaveBeenCalledWith(
+        'https://www.tiktok.com/@gaaby.tls/video/7624199329925958920',
+      )
+    })
   })
 
   it('multi-selects posts and deletes them via the backend', async () => {
@@ -581,5 +642,26 @@ describe('ProfileViewPage', () => {
     // Flip the direction to oldest first.
     fireEvent.click(screen.getByRole('menuitemradio', { name: /oldest first/i }))
     expect(thumbOrder(container)).toEqual(['l1', 't1', 't2', 'l2'])
+  })
+
+  it('places TikTok stats refresh in the header and queues a manual stats refresh', async () => {
+    bridgeMocks.loadSourceMediaGallery.mockResolvedValue(tiktokMixedFixture())
+    const { container } = render(<ProfileViewPage initialSourceId="tk-1" />)
+
+    const refreshButton = await screen.findByRole('button', { name: /refresh media stats/i })
+    expect(refreshButton.closest('.profile-view-header-actions')).toBeTruthy()
+    const toolbar = container.querySelector('.profile-view-toolbar')
+    expect(toolbar).toBeTruthy()
+    expect(within(toolbar as HTMLElement).queryByRole('button', { name: /refresh media stats/i })).toBeNull()
+
+    fireEvent.click(refreshButton)
+
+    await waitFor(() =>
+      expect(bridgeMocks.runSourceSync).toHaveBeenCalledWith('tk-1', {
+        trigger: 'manual_stats_refresh',
+        runMode: 'refresh_media_stats',
+      }),
+    )
+    await waitFor(() => expect(refreshButton.textContent).toMatch(/queued/i))
   })
 })

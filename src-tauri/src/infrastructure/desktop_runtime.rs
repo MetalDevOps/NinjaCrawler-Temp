@@ -46,7 +46,7 @@ const CONNECTOR_RUNTIMES_WINDOW_LABEL: &str = "connector-runtimes";
 const SINGLE_VIDEOS_WINDOW_LABEL: &str = "single-videos";
 const IMPORT_WINDOW_LABEL: &str = "import";
 const BATCH_EDITOR_WINDOW_LABEL: &str = "batch-editor";
-const PROFILE_VIEW_WINDOW_LABEL: &str = "profile-view";
+const PROFILE_VIEW_WINDOW_LABEL_PREFIX: &str = "profile-view-";
 const MANAGED_STANDALONE_WINDOW_LABELS: &[&str] = &[
     RUNTIME_LOG_WINDOW_LABEL,
     CONNECTOR_DEBUG_WINDOW_LABEL,
@@ -58,7 +58,6 @@ const MANAGED_STANDALONE_WINDOW_LABELS: &[&str] = &[
     PLANS_WINDOW_LABEL,
     IMPORT_WINDOW_LABEL,
     BATCH_EDITOR_WINDOW_LABEL,
-    PROFILE_VIEW_WINDOW_LABEL,
 ];
 #[cfg(desktop)]
 const TRAY_ID: &str = "main-runtime-tray";
@@ -340,21 +339,19 @@ pub fn open_profile_view_window(
     app: &tauri::AppHandle,
     source_id: String,
 ) -> Result<(), String> {
-    // Janela única reutilizada: ao reabrir com outro perfil, emite o novo
-    // sourceId para a página recarregar.
-    if let Some(window) = app.get_webview_window(PROFILE_VIEW_WINDOW_LABEL) {
+    let label = profile_view_window_label(&source_id);
+    // Uma janela por perfil: reabrir o mesmo sourceId foca a janela existente,
+    // enquanto perfis diferentes ficam lado a lado.
+    if let Some(window) = app.get_webview_window(&label) {
         window.show().map_err(|error| error.to_string())?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
-        window
-            .emit(PROFILE_VIEW_WINDOW_SOURCE_EVENT, source_id)
-            .map_err(|error| error.to_string())?;
         return Ok(());
     }
 
     let app_handle = app.clone();
     std::thread::spawn(move || {
-        if let Err(error) = create_profile_view_window(&app_handle, &source_id) {
+        if let Err(error) = create_profile_view_window(&app_handle, &source_id, &label) {
             eprintln!("[profile-view] failed to create window: {error}");
         }
     });
@@ -646,10 +643,14 @@ fn create_source_sync_queue_window(app: &tauri::AppHandle) -> Result<(), String>
     )
 }
 
-fn create_profile_view_window(app: &tauri::AppHandle, source_id: &str) -> Result<(), String> {
+fn create_profile_view_window(
+    app: &tauri::AppHandle,
+    source_id: &str,
+    label: &str,
+) -> Result<(), String> {
     let window = tauri::WebviewWindowBuilder::new(
         app,
-        PROFILE_VIEW_WINDOW_LABEL,
+        label,
         tauri::WebviewUrl::App(profile_view_entrypoint(source_id).into()),
     )
     .title("Profile View")
@@ -1193,6 +1194,22 @@ fn profile_view_entrypoint(source_id: &str) -> String {
             encode_query_component(sanitized)
         )
     }
+}
+
+fn profile_view_window_label(source_id: &str) -> String {
+    let sanitized = source_id.trim();
+    let mut suffix = String::new();
+    for byte in sanitized.bytes() {
+        match byte {
+            b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => suffix.push(byte as char),
+            b'A'..=b'Z' => suffix.push((byte as char).to_ascii_lowercase()),
+            _ => suffix.push_str(&format!("_{byte:02x}")),
+        }
+    }
+    if suffix.is_empty() {
+        suffix.push_str("unknown");
+    }
+    format!("{PROFILE_VIEW_WINDOW_LABEL_PREFIX}{suffix}")
 }
 
 fn connector_runtimes_entrypoint() -> String {
@@ -1775,6 +1792,33 @@ mod tests {
         for label in super::MANAGED_STANDALONE_WINDOW_LABELS {
             assert!(super::is_state_managed_window_label(label));
         }
+        assert!(!super::is_state_managed_window_label(
+            "profile-view-dea6448e-62e7-4f4d-9cec-9b49b15f3f66"
+        ));
         assert!(!super::is_state_managed_window_label("unknown-window"));
+    }
+
+    #[test]
+    fn profile_view_window_label_is_deterministic_per_source() {
+        assert_eq!(
+            super::profile_view_window_label("DEA6448E-62E7-4F4D-9CEC-9B49B15F3F66"),
+            "profile-view-dea6448e-62e7-4f4d-9cec-9b49b15f3f66"
+        );
+        assert_eq!(
+            super::profile_view_window_label(" same source "),
+            "profile-view-same_20source"
+        );
+        assert_eq!(
+            super::profile_view_window_label(""),
+            "profile-view-unknown"
+        );
+        assert_eq!(
+            super::profile_view_window_label("src-1"),
+            super::profile_view_window_label("src-1")
+        );
+        assert_ne!(
+            super::profile_view_window_label("src-1"),
+            super::profile_view_window_label("src-2")
+        );
     }
 }

@@ -290,26 +290,6 @@ export function SingleVideosPage() {
     [previewItems.length],
   )
 
-  // Teclado no lightbox.
-  const lightboxOpen = lightboxIndex !== undefined
-  const lightboxOpenRef = useRef(lightboxOpen)
-  lightboxOpenRef.current = lightboxOpen
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (!lightboxOpenRef.current) return
-      if (event.key === 'Escape') {
-        event.stopImmediatePropagation()
-        closeLightbox()
-      } else if (event.key === 'ArrowLeft') {
-        stepLightbox(-1)
-      } else if (event.key === 'ArrowRight') {
-        stepLightbox(1)
-      }
-    }
-    document.addEventListener('keydown', handler, true)
-    return () => document.removeEventListener('keydown', handler, true)
-  }, [closeLightbox, stepLightbox])
-
   const performDelete = useCallback(async () => {
     if (!confirmIds || confirmIds.length === 0) return
     setDeleting(true)
