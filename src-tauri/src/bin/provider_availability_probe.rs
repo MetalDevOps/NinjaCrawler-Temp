@@ -319,6 +319,7 @@ fn build_instagram_identity_probe_request(
         text_special_folder: false,
         get_user_media_only: false,
         missing_only: false,
+        full_scan: false,
         date_from_timestamp: None,
         date_to_timestamp: None,
         media_file_naming_mode: instagram_connector::InstagramMediaFileNamingMode::PresetNewDefault,

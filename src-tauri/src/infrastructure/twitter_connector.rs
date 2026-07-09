@@ -258,7 +258,7 @@ where
             return Err("source sync cancelled by user".to_string());
         }
 
-        apply_sleep_timer(request, run_index);
+        apply_sleep_timer(request, run_index, &is_cancelled);
 
         report_progress(TwitterProgress {
             label: format!("Parsing {}", run.media_section),
@@ -290,6 +290,10 @@ where
         let page_output = match parse_outcome {
             Ok(output) => output,
             Err(error) => {
+                // Cancelamento nunca é "erro de seção" a engolir — aborta o sync.
+                if is_cancelled() || error.contains("cancelled by user") {
+                    return Err(error);
+                }
                 section_errors.push(format!("{}: {}", run.media_section, error));
                 continue;
             }
@@ -584,7 +588,26 @@ struct DownloadPlanEntry {
     captured_at_timestamp: Option<i64>,
 }
 
-fn apply_sleep_timer(request: &TwitterConnectorRequest, run_index: usize) {
+/// Dorme em passos curtos, abortando assim que o cancelamento é solicitado —
+/// evita ficar preso no sleep timer (potencialmente longo) entre modelos.
+fn interruptible_sleep(total: Duration, is_cancelled: &dyn Fn() -> bool) {
+    const STEP: Duration = Duration::from_millis(200);
+    let mut remaining = total;
+    while !remaining.is_zero() {
+        if is_cancelled() {
+            return;
+        }
+        let chunk = STEP.min(remaining);
+        thread::sleep(chunk);
+        remaining -= chunk;
+    }
+}
+
+fn apply_sleep_timer(
+    request: &TwitterConnectorRequest,
+    run_index: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) {
     let seconds = if run_index == 0 {
         match request.sleep_timer_before_first_secs {
             -2 => request.sleep_timer_secs,
@@ -594,7 +617,7 @@ fn apply_sleep_timer(request: &TwitterConnectorRequest, run_index: usize) {
         request.sleep_timer_secs
     };
     if seconds > 0 {
-        thread::sleep(Duration::from_secs(seconds as u64));
+        interruptible_sleep(Duration::from_secs(seconds as u64), is_cancelled);
     }
 }
 

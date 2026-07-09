@@ -1418,6 +1418,7 @@ fn batch_update_source_profiles_applies_group_and_sync_patch_when_inputs_are_val
                     extract_image_from_video: None,
                     get_user_media_only: Some(true),
                     missing_only: None,
+                    full_scan: None,
                     verified_profile: None,
                     force_update_user_name: None,
                     force_update_user_information: None,
@@ -1478,6 +1479,7 @@ fn apply_instagram_patch_updates_media_agnostic_fields() {
         }),
         get_user_media_only: None,
         missing_only: None,
+        full_scan: None,
         verified_profile: None,
         force_update_user_name: None,
         force_update_user_information: None,
@@ -1537,12 +1539,14 @@ fn instagram_manifest_suffix_is_omitted_for_zero_download_success() {
     );
     assert_eq!(
         format_instagram_manifest_suffix(Some(&manifest_summary), true),
-        " Manifest retained 0 posts and queued 0 assets across 4 sections after filtering 4 existing posts."
+        " 4 posts already up to date."
     );
 }
 
 #[test]
-fn instagram_manifest_suffix_omits_zero_value_filter_counts() {
+fn instagram_manifest_suffix_is_empty_when_nothing_was_already_synced() {
+    // Tudo novo (nenhum post reconhecido como já sincronizado) → sem sufixo; o
+    // resumo base ("Downloaded N media items.") já basta.
     let manifest_summary = instagram_connector::InstagramManifestSummary {
         section_count: 4,
         discovered_item_count: 0,
@@ -1561,7 +1565,17 @@ fn instagram_manifest_suffix_omits_zero_value_filter_counts() {
 
     assert_eq!(
         format_instagram_manifest_suffix(Some(&manifest_summary), true),
-        " Manifest retained 12 posts and queued 13 assets across 4 sections."
+        ""
+    );
+
+    // Singular quando só 1 post já estava em dia.
+    let single = instagram_connector::InstagramManifestSummary {
+        skipped_existing_post_count: 1,
+        ..manifest_summary
+    };
+    assert_eq!(
+        format_instagram_manifest_suffix(Some(&single), true),
+        " 1 post already up to date."
     );
 }
 

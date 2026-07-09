@@ -1318,12 +1318,27 @@ pub(super) fn execute_twitter_source_sync_with_connection(
             }
 
             let downloaded = result.downloaded_media.len();
-            let mut summary = format!(
-                "Twitter sync succeeded. Downloaded {} media items. Manifest parsed {} pages and queued {} assets.",
-                downloaded,
-                result.manifest_summary.parsed_page_count,
-                result.manifest_summary.queued_asset_count
+            // Detalhamento técnico → realtime debugger (o resumo fica amigável).
+            connector_debug::append_current(
+                "internal.twitter",
+                "summary",
+                "manifest",
+                format!(
+                    "parsed_pages={} queued_assets={} downloaded_assets={} skipped_existing_posts={} skipped_existing_assets={}",
+                    result.manifest_summary.parsed_page_count,
+                    result.manifest_summary.queued_asset_count,
+                    downloaded,
+                    result.manifest_summary.skipped_existing_post_count,
+                    result.manifest_summary.skipped_existing_asset_count,
+                ),
             );
+            let mut summary = format_download_success_summary(
+                "Twitter sync succeeded.",
+                downloaded,
+            );
+            summary.push_str(&format_already_up_to_date_suffix(
+                result.manifest_summary.skipped_existing_post_count,
+            ));
             if result.limit_aborted {
                 summary.push_str(" Rate limit reached; remaining models were skipped.");
             }
@@ -2029,36 +2044,42 @@ pub(super) fn execute_tiktok_source_sync_with_connection(
                             || post.share_count.is_some()
                     })
                     .count();
-            let mut summary = format!(
-                "TikTok sync succeeded. Scanned {} post(s), found {} new post(s), downloaded {} media item(s).",
-                result.manifest_summary.normalized_post_count,
-                result.manifest_summary.queued_asset_count,
-                downloaded,
-            );
-            if collect_media_stats {
-                summary.push_str(&format!(
-                    " Stats: updated {} post(s){}.",
+            // Detalhamento técnico (scan, páginas, liked videos) → realtime
+            // debugger; o resumo mostrado ao usuário fica curto e amigável.
+            connector_debug::append_current(
+                "internal.tiktok",
+                "summary",
+                "manifest",
+                format!(
+                    "scanned_posts={} parsed_pages={} discovered_assets={} queued_assets={} downloaded_assets={} skipped_existing_posts={} skipped_existing_assets={} stats_updated={} liked(pages={}, discovered={}, downloaded={}, skipped_existing={}, failed={}, stopped_incrementally={})",
+                    result.manifest_summary.normalized_post_count,
+                    result.manifest_summary.parsed_page_count,
+                    result.manifest_summary.discovered_asset_count,
+                    result.manifest_summary.queued_asset_count,
+                    downloaded,
+                    result.manifest_summary.skipped_existing_post_count,
+                    result.manifest_summary.skipped_existing_asset_count,
                     stats_updated,
-                    if refresh_existing_media_stats {
-                        " including existing media"
-                    } else {
-                        ""
-                    }
-                ));
-            }
-            if liked_videos_enabled {
-                summary.push_str(&format!(
-                    " Liked videos: read {} pages, discovered {}, downloaded {}, skipped {} existing, failed {}{}.",
                     likes.pages_read,
                     likes.discovered,
                     likes.downloaded,
                     likes.skipped_existing,
                     likes.failed,
-                    if likes.stopped_incrementally {
-                        ", stopped at the configured known-page threshold"
-                    } else {
-                        ""
-                    }
+                    likes.stopped_incrementally,
+                ),
+            );
+            let mut summary =
+                format_download_success_summary("TikTok sync succeeded.", downloaded);
+            summary.push_str(&format_already_up_to_date_suffix(
+                result.manifest_summary.skipped_existing_post_count,
+            ));
+            if collect_media_stats && stats_updated > 0 {
+                summary.push_str(&format!(" Stats updated for {stats_updated} post(s)."));
+            }
+            if liked_videos_enabled && likes.failed > 0 {
+                summary.push_str(&format!(
+                    " {} liked video(s) could not be downloaded.",
+                    likes.failed
                 ));
             }
             if result.limit_aborted {
@@ -3938,6 +3959,7 @@ pub(super) fn build_instagram_profile_sync_request(
         text_special_folder: source_options.text_special_folder.unwrap_or(true),
         get_user_media_only: source_options.get_user_media_only.unwrap_or(false),
         missing_only: instagram_missing_only_enabled(&source_options),
+        full_scan: instagram_full_scan_enabled(&source_options),
         date_from_timestamp: explicit_date_from_timestamp
             .or_else(|| implicit_instagram_imported_cutoff_timestamp(&context.source, run_mode)),
         date_to_timestamp: instagram_date_to_timestamp(&source_options),

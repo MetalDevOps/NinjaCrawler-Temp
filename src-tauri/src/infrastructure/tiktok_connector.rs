@@ -609,7 +609,10 @@ where
             }
 
             if request.sleep_timer_secs > 0 && processed < total {
-                thread::sleep(Duration::from_secs(request.sleep_timer_secs as u64));
+                interruptible_sleep(
+                    Duration::from_secs(request.sleep_timer_secs as u64),
+                    &is_cancelled,
+                );
             }
         }
 
@@ -1699,6 +1702,21 @@ fn apply_user_agent(command: &mut Command, request: &TikTokConnectorRequest) {
 /// Roda um processo capturando stdout/stderr, com polling de cancel/timeout.
 /// As saídas são drenadas em threads concorrentes para evitar deadlock quando o
 /// yt-dlp produz muita saída.
+/// Dorme em passos curtos, abortando assim que o cancelamento é solicitado —
+/// evita ficar preso no sleep timer (potencialmente longo) entre batches.
+fn interruptible_sleep(total: Duration, is_cancelled: &dyn Fn() -> bool) {
+    const STEP: Duration = Duration::from_millis(200);
+    let mut remaining = total;
+    while !remaining.is_zero() {
+        if is_cancelled() {
+            return;
+        }
+        let chunk = STEP.min(remaining);
+        thread::sleep(chunk);
+        remaining -= chunk;
+    }
+}
+
 fn run_capturing<C>(
     command: Command,
     timeout_secs: u64,
