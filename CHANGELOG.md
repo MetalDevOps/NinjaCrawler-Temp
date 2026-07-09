@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.13.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.12.0...v0.13.0) (2026-07-09)
+
+
+### Features
+
+* **instagram:** add incremental feed discovery and full-scan override ([#91](https://github.com/MetalDevOps/NinjaCrawler/issues/91)) ([000052c](https://github.com/MetalDevOps/NinjaCrawler/commit/000052ccc8c4461f4e34b5e500d2cd9cd6805d7b))
+
+
+### Bug Fixes
+
+* **tiktok:** preserve sync history on transient empty provider listings ([#92](https://github.com/MetalDevOps/NinjaCrawler/issues/92)) ([f3bff77](https://github.com/MetalDevOps/NinjaCrawler/commit/f3bff770b25ec8f3ec982ef934137acfc24f70d9))
+
 ## [0.12.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.11.0...v0.12.0) (2026-07-08)
 
 
