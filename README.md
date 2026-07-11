@@ -1,8 +1,28 @@
+<div align="center">
+
 # NinjaCrawler
 
-NinjaCrawler is a Windows desktop application for organizing profiles, downloading media, and scheduling recurring synchronization across social platforms.
+**Windows desktop workspace for organizing social profiles, downloading media, and running recurring syncs.**
 
-It is built with Rust, Tauri 2, React, and TypeScript. Metadata and operational state stay in a local SQLite database, while downloaded media remains directly accessible on disk.
+`Windows` · `x64` · `Instagram` · `TikTok` · `X / Twitter`
+
+[![Latest release](https://img.shields.io/github/v/release/MetalDevOps/NinjaCrawler?include_prereleases&display_name=tag&sort=semver&label=latest&color=2ea44f)](https://github.com/MetalDevOps/NinjaCrawler/releases)
+[![Downloads](https://img.shields.io/github/downloads/MetalDevOps/NinjaCrawler/total?label=downloads&color=1f6feb)](https://github.com/MetalDevOps/NinjaCrawler/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/MetalDevOps/NinjaCrawler/ci.yml?branch=develop&label=ci)](https://github.com/MetalDevOps/NinjaCrawler/actions/workflows/ci.yml)
+
+<!-- ninjacrawler-release-start -->
+<a href="https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.13.0/NinjaCrawler-0.13.0-windows-x64-setup.exe">
+  <img src="https://img.shields.io/badge/Download%20for%20Windows-x64-2ea44f?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows x64" height="46">
+</a>
+
+<sub>Current release: v0.13.0 · [portable zip](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.13.0/NinjaCrawler-0.13.0-windows-x64-portable.zip) · [checksums](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.13.0/SHA256SUMS.txt) · [all releases](https://github.com/MetalDevOps/NinjaCrawler/releases) · [changelog](CHANGELOG.md)</sub>
+<!-- ninjacrawler-release-end -->
+
+</div>
+
+---
+
+NinjaCrawler is built with Rust, Tauri 2, React, and TypeScript. Metadata and operational state stay in a local SQLite database, while downloaded media remains directly accessible on disk.
 
 > [!IMPORTANT]
 > NinjaCrawler is under active development. Configuration formats, provider behavior, and migration compatibility may change before the first stable release.
@@ -19,6 +39,17 @@ It is built with Rust, Tauri 2, React, and TypeScript. Metadata and operational 
 - Browse downloaded media by profile and date, open the original post, or reveal the local file.
 - Manage bundled connector runtimes such as `gallery-dl`, `yt-dlp`, and Instaloader.
 - Add or sync profiles from Chrome through the optional NinjaCrawler Companion extension.
+
+## Getting started
+
+<!-- ninjacrawler-release-start -->
+1. **[Download NinjaCrawler for Windows](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.13.0/NinjaCrawler-0.13.0-windows-x64-setup.exe)**.
+2. Windows SmartScreen may warn about an unknown publisher because the current builds are unsigned. Choose **More info** and then **Run anyway** if you trust this repository.
+3. Install with the setup executable, or download the [portable zip](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.13.0/NinjaCrawler-0.13.0-windows-x64-portable.zip) if you prefer a folder-based build.
+4. Optional: compare the file hash with [SHA256SUMS.txt](https://github.com/MetalDevOps/NinjaCrawler/releases/download/v0.13.0/SHA256SUMS.txt).
+<!-- ninjacrawler-release-end -->
+
+After first launch, open the workspace settings to choose a media folder, configure provider accounts, and install or update connector runtimes.
 
 ## Provider support
 
