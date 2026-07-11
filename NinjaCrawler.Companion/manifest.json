@@ -12,6 +12,14 @@
     "service_worker": "src/background.js",
     "type": "module"
   },
+  "commands": {
+    "sync-profile": {
+      "description": "Sync the profile in the active tab"
+    },
+    "download-story": {
+      "description": "Download the story in the active tab"
+    }
+  },
   "permissions": ["activeTab", "cookies", "scripting", "storage", "tabs", "webRequest"],
   "host_permissions": [
     "http://127.0.0.1:47219/*",
