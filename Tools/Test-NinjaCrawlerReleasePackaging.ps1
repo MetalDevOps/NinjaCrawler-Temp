@@ -52,10 +52,48 @@ try {
     if ($checksumContents -notmatch [regex]::Escape("$expectedHash  $assetName")) {
         throw "Companion checksum is missing or incorrect."
     }
+
+    $readmeFixture = Join-Path $testOutputPath "README.release-test.md"
+    Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $readmeFixture
+    & (Join-Path $PSScriptRoot "Update-NinjaCrawlerReleaseReadme.ps1") `
+        -Version "9.8.7" `
+        -Path $readmeFixture
+
+    $readmeContents = Get-Content -LiteralPath $readmeFixture -Raw
+    foreach ($expectedLink in @(
+        "releases/download/v9.8.7/NinjaCrawler-9.8.7-windows-x64-setup.exe",
+        "releases/download/v9.8.7/NinjaCrawler-9.8.7-windows-x64-portable.zip",
+        "releases/download/v9.8.7/SHA256SUMS.txt"
+    )) {
+        if (-not $readmeContents.Contains($expectedLink)) {
+            throw "README release updater missed expected link '$expectedLink'."
+        }
+    }
+
+    $releaseBlocks = [regex]::Matches(
+        $readmeContents,
+        '(?ms)<!--\s*ninjacrawler-release-start\s*-->(.*?)<!--\s*ninjacrawler-release-end\s*-->'
+    )
+    if ($releaseBlocks.Count -ne 2) {
+        throw "Expected exactly 2 updated README release blocks."
+    }
+    foreach ($releaseBlock in $releaseBlocks) {
+        $versions = @(
+            [regex]::Matches(
+                $releaseBlock.Value,
+                '(?<!\d)\d+\.\d+\.\d+(?![\d.])'
+            ) |
+                ForEach-Object Value |
+                Select-Object -Unique
+        )
+        if ($versions.Count -ne 1 -or $versions[0] -ne "9.8.7") {
+            throw "README release block contains unexpected versions: $($versions -join ', ')."
+        }
+    }
 } finally {
     if (Test-Path -LiteralPath $testOutputPath) {
         Remove-Item -LiteralPath $testOutputPath -Recurse -Force
     }
 }
 
-Write-Host "Companion release packaging test passed."
+Write-Host "Release packaging tests passed."
