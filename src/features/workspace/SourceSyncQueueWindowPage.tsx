@@ -5,6 +5,7 @@ import {
   cancelSourceSyncProvider,
   enqueueMediaThumbnailGeneration,
   loadMediaThumbnailQueueStatus,
+  loadMediaPathMigrationQueueStatus,
   loadSourceDeleteQueueStatus,
   loadSourceSyncQueueStatus,
   loadWorkspaceSnapshot,
@@ -28,6 +29,7 @@ import type {
   SourceSyncQueueRecentResult,
   SourceSyncQueueStatus,
   MediaThumbnailQueueStatus,
+  MediaPathMigrationQueueStatus,
   SchedulerGroup,
   SingleVideoQueueRecentResult,
   SingleVideoQueueStatus,
@@ -319,6 +321,7 @@ export function SourceSyncQueueWindowPage() {
   const [thumbnailScope, setThumbnailScope] = useState<'all' | 'provider' | 'group' | 'profile'>('profile')
   const [thumbnailScopeValue, setThumbnailScopeValue] = useState('')
   const [thumbnailStatus, setThumbnailStatus] = useState<MediaThumbnailQueueStatus>()
+  const [migrationStatus, setMigrationStatus] = useState<MediaPathMigrationQueueStatus>()
   const [queueingThumbnails, setQueueingThumbnails] = useState(false)
 
   const refreshQueueStatus = useCallback(async (silent = false) => {
@@ -327,6 +330,7 @@ export function SourceSyncQueueWindowPage() {
         loadSourceSyncQueueStatus(),
         loadSourceDeleteQueueStatus(),
       ])
+      void loadMediaPathMigrationQueueStatus().then(setMigrationStatus).catch(() => undefined)
       setSyncStatus(nextSyncStatus)
       setDeleteStatus(nextDeleteStatus)
       if (!silent) {
@@ -412,6 +416,11 @@ export function SourceSyncQueueWindowPage() {
   }, [refreshQueueStatus, refreshAvatars])
 
   useEffect(() => {
+    const timer = window.setInterval(() => void loadMediaPathMigrationQueueStatus().then(setMigrationStatus).catch(() => undefined), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
     let disposed = false
     let unsubscribe: (() => void) | undefined
     void subscribeToSingleVideoQueue((next) => {
@@ -438,6 +447,7 @@ export function SourceSyncQueueWindowPage() {
       onSourceDeleteQueueChanged: (next) => {
         if (!disposed) setDeleteStatus(next)
       },
+      onMediaPathMigrationQueueChanged: setMigrationStatus,
     })
       .then((teardown) => {
         if (disposed) {
@@ -826,6 +836,26 @@ export function SourceSyncQueueWindowPage() {
         </button>
       </header>
 
+      <section className="thumbnail-queue-panel panel" aria-label="Media path migrations">
+        <div className="thumbnail-queue-heading">
+          <div>
+            <h2>Media path migrations</h2>
+            <p>Profile folders are moved one at a time. The main window remains available.</p>
+          </div>
+          <span className="thumbnail-target-count">{migrationStatus?.queuedCount ?? 0} queued</span>
+        </div>
+        {migrationStatus?.runningItems.map((job) => (
+          <div className="thumbnail-queue-progress" key={job.jobId}>
+            <div><strong>{job.handle}</strong><span className="queue-data">{job.filesProcessed}/{job.filesTotal} files · {formatMigrationBytes(job.bytesProcessed)}/{formatMigrationBytes(job.bytesTotal)}</span></div>
+            <div className="queue-status-progress-track"><div className="queue-status-progress-fill" style={{ width: `${job.progressPercent ?? 0}%` }} /></div>
+            <small className="muted-text" title={`${job.sourcePath} → ${job.targetPath}`}>{job.progressLabel} · {job.progressDetail}<br />{job.sourcePath} → {job.targetPath}</small>
+          </div>
+        ))}
+        {!migrationStatus?.runningCount && !migrationStatus?.queuedCount ? <small className="muted-text">No media path migrations are active.</small> : null}
+        {migrationStatus?.queuedItems.slice(0, 5).map((job) => <small className="muted-text" key={job.jobId}><strong>{job.handle}</strong> · waiting · {job.sourcePath} → {job.targetPath}</small>)}
+        {migrationStatus?.recentResults.slice(0, 4).map((result) => <small className="muted-text" key={`${result.jobId}-${result.finishedAt}`}><strong>{result.handle}</strong> · {result.status} · {result.summary}{result.error ? ` · ${result.error}` : ''}</small>)}
+      </section>
+
       <section className="thumbnail-queue-panel panel">
         <div className="thumbnail-queue-heading">
           <div>
@@ -1143,4 +1173,11 @@ export function SourceSyncQueueWindowPage() {
       </section>
     </div>
   )
+}
+
+function formatMigrationBytes(value: number): string {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }

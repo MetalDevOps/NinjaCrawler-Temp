@@ -797,12 +797,29 @@ pub(super) fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-/// Muda o path de salvamento de um ou mais perfis do Instagram para
-/// `target_base_path/<handle>`, opcionalmente movendo a mídia já baixada.
+/// Changes the save path for one or more supported profiles to
+/// `target_base_path/<handle>`, optionally moving already-downloaded media.
 pub fn change_source_media_path(
     source_ids: Vec<String>,
     target_base_path: String,
     move_media: bool,
+) -> Result<WorkspaceSnapshot, String> {
+    change_source_media_path_internal(source_ids, target_base_path, move_media, None)
+}
+
+pub fn change_source_media_path_migration(
+    source_id: String,
+    target_base_path: String,
+    job_id: &str,
+) -> Result<WorkspaceSnapshot, String> {
+    change_source_media_path_internal(vec![source_id], target_base_path, true, Some(job_id))
+}
+
+fn change_source_media_path_internal(
+    source_ids: Vec<String>,
+    target_base_path: String,
+    move_media: bool,
+    migration_job_id: Option<&str>,
 ) -> Result<WorkspaceSnapshot, String> {
     with_workspace(|connection, layout| {
         let base = PathBuf::from(target_base_path.trim());
@@ -819,25 +836,15 @@ pub fn change_source_media_path(
             let Some(source) = sources_by_id.get(source_id) else {
                 continue;
             };
-            if !source.provider.eq_ignore_ascii_case("instagram") {
-                continue;
-            }
-
             let account_settings = source
                 .account_id
                 .as_ref()
                 .map(|account_id| load_provider_account_settings_map(connection, account_id))
                 .transpose()?;
-            let options = source_instagram_sync_options(source);
-            let old_root = resolve_instagram_profile_root_with_options(
-                layout,
-                source,
-                account_settings.as_ref(),
-                Some(&options),
-            );
+            let old_root = resolved_source_media_output_root(layout, source, account_settings.as_ref());
 
             let folder = sanitize_path_segment(
-                sanitize_source_handle("instagram", &source.handle).trim_start_matches('@'),
+                sanitize_source_handle(&source.provider, &source.handle).trim_start_matches('@'),
             );
             let new_root = base.join(&folder);
             if new_root == old_root {
@@ -853,16 +860,41 @@ pub fn change_source_media_path(
                 _ => false,
             };
 
-            if move_media && !same_physical_dir && old_root.exists() {
-                move_media_directory(&old_root, &new_root)?;
+            if move_media && !same_physical_dir {
+                if let Some(job_id) = migration_job_id {
+                    // A staging directory is owned by this durable job. It makes a
+                    // cross-volume copy resumable: on restart, promote the staging
+                    // directory instead of mistaking it for a user's destination.
+                    let staging_root = base.join(format!(".ninjacrawler-moving-{job_id}"));
+                    if staging_root.exists() {
+                        if new_root.exists() {
+                            return Err(format!(
+                                "Destino de mídia já existe: {}",
+                                new_root.display()
+                            ));
+                        }
+                        move_media_directory(&staging_root, &new_root)?;
+                    } else if old_root.exists() {
+                        move_media_directory(&old_root, &staging_root)?;
+                        move_media_directory(&staging_root, &new_root)?;
+                    }
+                } else if old_root.exists() {
+                    move_media_directory(&old_root, &new_root)?;
+                }
             }
 
             let mut sync_options = source.sync_options.clone();
-            let instagram = sync_options
-                .instagram
-                .get_or_insert_with(default_instagram_source_sync_options);
-            instagram.special_path = Some(new_root.display().to_string());
-            let serialized = serialize_source_sync_options("instagram", &sync_options)?;
+            let special_path = Some(new_root.display().to_string());
+            if source.provider.eq_ignore_ascii_case("instagram") {
+                sync_options.instagram.get_or_insert_with(default_instagram_source_sync_options).special_path = special_path;
+            } else if source.provider.eq_ignore_ascii_case("twitter") {
+                sync_options.twitter.get_or_insert_with(default_twitter_source_sync_options).special_path = special_path;
+            } else if source.provider.eq_ignore_ascii_case("tiktok") {
+                sync_options.tiktok.get_or_insert_with(default_tiktok_source_sync_options).special_path = special_path;
+            } else {
+                return Err(format!("Changing the save path is not supported for {} profiles.", source.provider));
+            }
+            let serialized = serialize_source_sync_options(&source.provider, &sync_options)?;
 
             // A foto de perfil mora dentro da pasta movida (Settings/...); o
             // path absoluto persistido precisa acompanhar a mudança, senão a UI
@@ -909,9 +941,83 @@ pub fn change_source_media_path(
         load_snapshot(connection, layout)
     })
 }
-/// Resolve o path absoluto de salvamento de mídia de cada perfil do Instagram,
-/// reusando a mesma lógica do sync (specialPath > mediaPath da conta > media_root
-/// global + handle). Erros de leitura de settings degradam para o root global.
+
+/// Minimal immutable data needed by the asynchronous media-path worker.
+pub fn media_path_migration_seed(source_id: String) -> Result<(String, String, String), String> {
+    let snapshot = bootstrap_workspace()?;
+    let source = snapshot
+        .sources
+        .into_iter()
+        .find(|source| source.id == source_id)
+        .ok_or_else(|| "Profile no longer exists.".to_string())?;
+    if !matches!(source.provider.to_ascii_lowercase().as_str(), "instagram" | "twitter" | "tiktok") {
+        return Err(format!("Changing the save path is not supported for {} profiles.", source.provider));
+    }
+    let source_path = snapshot
+        .source_media_paths
+        .get(&source.id)
+        .cloned()
+        .ok_or_else(|| "Could not resolve the current media path.".to_string())?;
+    Ok((source.provider, source.handle, source_path))
+}
+
+pub fn persist_media_path_migration_job(
+    job_id: &str,
+    source_id: &str,
+    target_base_path: &str,
+    queued_at: &str,
+) -> Result<(), String> {
+    with_workspace(|connection, _| {
+        connection.execute(
+            "INSERT INTO media_path_migration_queue_jobs(job_id, source_id, target_base_path, queued_at, state)
+             VALUES (?1, ?2, ?3, ?4, 'queued')
+             ON CONFLICT(source_id) DO NOTHING",
+            params![job_id, source_id, target_base_path, queued_at],
+        ).map_err(|error| error.to_string())?;
+        Ok(())
+    })
+}
+
+pub fn load_media_path_migration_jobs() -> Result<Vec<(String, String, String, String)>, String> {
+    with_workspace(|connection, _| {
+        connection.execute("UPDATE media_path_migration_queue_jobs SET state = 'queued', started_at = NULL WHERE state = 'running'", [])
+            .map_err(|error| error.to_string())?;
+        let mut statement = connection.prepare(
+            "SELECT job_id, source_id, target_base_path, queued_at FROM media_path_migration_queue_jobs WHERE state = 'queued' ORDER BY queued_at"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        Ok(rows)
+    })
+}
+
+pub fn set_media_path_migration_job_running(job_id: &str, started_at: &str) -> Result<(), String> {
+    with_workspace(|connection, _| {
+        connection.execute(
+        "UPDATE media_path_migration_queue_jobs SET state = 'running', started_at = ?2 WHERE job_id = ?1",
+        params![job_id, started_at],
+    ).map(|_| ()).map_err(|error| error.to_string())
+    })
+}
+
+pub fn remove_media_path_migration_job(job_id: &str) -> Result<(), String> {
+    with_workspace(|connection, _| {
+        connection
+            .execute(
+                "DELETE FROM media_path_migration_queue_jobs WHERE job_id = ?1",
+                params![job_id],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+}
+/// Resolves each profile's absolute media path using the same logic as sync.
+/// Settings lookup failures fall back to the global media root.
 pub(super) fn compute_source_media_paths(
     connection: &Connection,
     layout: &StorageLayout,
@@ -921,10 +1027,6 @@ pub(super) fn compute_source_media_paths(
     let mut result = HashMap::new();
 
     for source in sources {
-        if !source.provider.eq_ignore_ascii_case("instagram") {
-            continue;
-        }
-
         let settings = source.account_id.as_ref().map(|account_id| {
             account_settings_cache
                 .entry(account_id.clone())
@@ -934,13 +1036,7 @@ pub(super) fn compute_source_media_paths(
                 .clone()
         });
 
-        let options = source_instagram_sync_options(source);
-        let root = resolve_instagram_profile_root_with_options(
-            layout,
-            source,
-            settings.as_ref(),
-            Some(&options),
-        );
+        let root = resolved_source_media_output_root(layout, source, settings.as_ref());
         // Canonicaliza para a grafia real do disco (Windows é case-insensitive),
         // unificando variações como `instagram` vs `Instagram` no filtro da UI.
         let display = canonicalized_media_root_display(&root);
@@ -957,11 +1053,7 @@ pub(super) fn compute_source_media_paths(
 fn canonicalized_media_root_display(root: &Path) -> String {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(hit) = cache
-        .lock()
-        .ok()
-        .and_then(|guard| guard.get(root).cloned())
-    {
+    if let Some(hit) = cache.lock().ok().and_then(|guard| guard.get(root).cloned()) {
         return hit;
     }
     match root.canonicalize() {

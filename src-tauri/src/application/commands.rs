@@ -12,8 +12,9 @@ use crate::domain::models::{
     SyncPlanTargetPreview, SyncPlanTargetPreviewInput, SyncPlanUpsert, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
-    connector_debug, connector_runtime, desktop_runtime, import_runtime, media_thumbnail_runtime,
-    single_video_runtime, source_delete_runtime, source_sync_runtime, workspace_repository,
+    connector_debug, connector_runtime, desktop_runtime, import_runtime,
+    media_path_migration_runtime, media_thumbnail_runtime, single_video_runtime,
+    source_delete_runtime, source_sync_runtime, workspace_repository,
 };
 
 fn publish_snapshot(
@@ -267,6 +268,21 @@ pub fn change_source_media_path(
 }
 
 #[tauri::command]
+pub fn enqueue_source_media_path_migration(
+    app: tauri::AppHandle,
+    source_ids: Vec<String>,
+    target_base_path: String,
+) -> Result<crate::domain::models::MediaPathMigrationQueueStatus, String> {
+    media_path_migration_runtime::enqueue(&app, source_ids, target_base_path)
+}
+
+#[tauri::command]
+pub fn media_path_migration_queue_status(
+) -> Result<crate::domain::models::MediaPathMigrationQueueStatus, String> {
+    media_path_migration_runtime::status()
+}
+
+#[tauri::command]
 pub fn open_batch_editor_window(
     app: tauri::AppHandle,
     source_ids: Vec<String>,
@@ -279,6 +295,9 @@ pub fn delete_source_profile(
     app: tauri::AppHandle,
     input: SourceProfileDeleteInput,
 ) -> Result<WorkspaceSnapshot, String> {
+    if media_path_migration_runtime::is_source_migrating(&input.id) {
+        return Err("This profile has a media-path migration queued or running.".to_string());
+    }
     let status = source_sync_runtime::source_sync_queue_status()?;
     let blocked = status
         .queued_items
@@ -303,6 +322,9 @@ pub fn enqueue_source_delete(
     app: tauri::AppHandle,
     input: SourceProfileDeleteInput,
 ) -> Result<SourceDeleteQueueStatus, String> {
+    if media_path_migration_runtime::is_source_migrating(&input.id) {
+        return Err("This profile has a media-path migration queued or running.".to_string());
+    }
     source_delete_runtime::enqueue_source_delete(&app, input)
 }
 
@@ -316,6 +338,9 @@ pub fn run_source_sync(
     app: tauri::AppHandle,
     input: RunSourceSyncInput,
 ) -> Result<WorkspaceSnapshot, String> {
+    if media_path_migration_runtime::is_source_migrating(&input.id) {
+        return Err("This profile has a media-path migration queued or running.".to_string());
+    }
     publish_snapshot(&app, source_sync_runtime::enqueue_source_sync(&app, input)?)
 }
 

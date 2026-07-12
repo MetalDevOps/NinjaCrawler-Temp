@@ -25,6 +25,9 @@ pub fn run() {
                 thread::spawn(move || {
                     thread::sleep(Duration::from_millis(2000));
                     infrastructure::source_sync_runtime::restore_persisted_queue(&app_handle);
+                    infrastructure::media_path_migration_runtime::restore_persisted_queue(
+                        &app_handle,
+                    );
                 });
             }
 
@@ -74,6 +77,8 @@ pub fn run() {
             application::commands::upsert_source_profile,
             application::commands::batch_update_source_profiles,
             application::commands::change_source_media_path,
+            application::commands::enqueue_source_media_path_migration,
+            application::commands::media_path_migration_queue_status,
             application::commands::open_batch_editor_window,
             application::commands::delete_source_profile,
             application::commands::enqueue_source_delete,

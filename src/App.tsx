@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
-  changeSourceMediaPath,
+  enqueueSourceMediaPathMigration,
   checkSourceAvailability,
   enqueueSourceDelete,
   loadSourceDeleteQueueStatus,
@@ -1354,8 +1354,9 @@ function App() {
     setMediaPathSubmitting(true)
     setMediaPathError(undefined)
     try {
-      await changeSourceMediaPath(mediaPathChange.sourceIds, mediaPathChange.basePath, true)
+      await enqueueSourceMediaPathMigration(mediaPathChange.sourceIds, mediaPathChange.basePath)
       setMediaPathChange(undefined)
+      await openSourceSyncQueueWindow()
     } catch (error) {
       setMediaPathError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -1623,7 +1624,7 @@ function App() {
                 onClick={() => void confirmChangeSourceMediaPath()}
                 type="button"
               >
-                {mediaPathSubmitting ? 'Moving…' : 'Move and change path'}
+                {mediaPathSubmitting ? 'Queueing…' : 'Queue migration'}
               </button>
             </div>
           </section>

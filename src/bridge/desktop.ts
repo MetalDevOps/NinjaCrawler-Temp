@@ -77,6 +77,7 @@ import type {
   SourceMediaGallery,
   MediaGalleryPost,
   MediaThumbnailQueueStatus,
+  MediaPathMigrationQueueStatus,
   SchedulerSet,
   SchedulerGroup,
   SchedulerGroupUpsert,
@@ -136,6 +137,7 @@ const DESKTOP_SCHEDULER_TICK_EVENT_NAME = 'runtime://scheduler-tick'
 const DESKTOP_WORKSPACE_SNAPSHOT_CHANGED_EVENT_NAME = 'runtime://workspace-snapshot-changed'
 const DESKTOP_SOURCE_SYNC_QUEUE_CHANGED_EVENT_NAME = 'runtime://source-sync-queue-changed'
 const DESKTOP_SOURCE_DELETE_QUEUE_CHANGED_EVENT_NAME = 'runtime://source-delete-queue-changed'
+const DESKTOP_MEDIA_PATH_MIGRATION_QUEUE_CHANGED_EVENT_NAME = 'runtime://media-path-migration-queue-changed'
 const DESKTOP_IMPORT_QUEUE_CHANGED_EVENT_NAME = 'runtime://import-queue-changed'
 const DESKTOP_CONNECTOR_RUNTIME_CHANGED_EVENT_NAME = 'runtime://connector-runtime-changed'
 const DESKTOP_ACCOUNTS_WINDOW_INTENT_EVENT_NAME = 'runtime://accounts-window-intent'
@@ -1235,6 +1237,14 @@ function createEmptySourceDeleteQueueStatus(): SourceDeleteQueueStatus {
   }
 }
 
+function normalizeMediaPathMigrationQueueStatus(value: unknown): MediaPathMigrationQueueStatus {
+  const empty: MediaPathMigrationQueueStatus = { queuedCount: 0, runningCount: 0, completedCount: 0, failedCount: 0, totalCount: 0, queuedItems: [], runningItems: [], recentResults: [], updatedAt: new Date().toISOString() }
+  if (!isRecord(value)) return empty
+  const job = (entry: unknown) => isRecord(entry) ? ({ jobId: stringValue(entry, ['jobId', 'job_id'], ''), sourceId: stringValue(entry, ['sourceId', 'source_id'], ''), provider: normalizeProviderKey(pick(entry, 'provider')), handle: stringValue(entry, ['handle'], ''), sourcePath: stringValue(entry, ['sourcePath', 'source_path'], ''), targetPath: stringValue(entry, ['targetPath', 'target_path'], ''), state: stringValue(entry, ['state'], 'queued') as 'queued' | 'running', queuedAt: stringValue(entry, ['queuedAt', 'queued_at'], ''), startedAt: optionalStringValue(entry, ['startedAt', 'started_at']), progressPercent: optionalNumberValue(entry, ['progressPercent', 'progress_percent']), progressLabel: optionalStringValue(entry, ['progressLabel', 'progress_label']), progressDetail: optionalStringValue(entry, ['progressDetail', 'progress_detail']), filesProcessed: numberValue(entry, ['filesProcessed', 'files_processed'], 0), filesTotal: numberValue(entry, ['filesTotal', 'files_total'], 0), bytesProcessed: numberValue(entry, ['bytesProcessed', 'bytes_processed'], 0), bytesTotal: numberValue(entry, ['bytesTotal', 'bytes_total'], 0) }) : null
+  const result = (entry: unknown) => isRecord(entry) ? ({ ...job(entry)!, status: stringValue(entry, ['status'], 'failed') as 'succeeded' | 'failed', summary: stringValue(entry, ['summary'], ''), finishedAt: stringValue(entry, ['finishedAt', 'finished_at'], ''), error: optionalStringValue(entry, ['error']) }) : null
+  return { queuedCount: numberValue(value, ['queuedCount', 'queued_count'], 0), runningCount: numberValue(value, ['runningCount', 'running_count'], 0), completedCount: numberValue(value, ['completedCount', 'completed_count'], 0), failedCount: numberValue(value, ['failedCount', 'failed_count'], 0), totalCount: numberValue(value, ['totalCount', 'total_count'], 0), queuedItems: arrayValue(value, ['queuedItems', 'queued_items']).map(job).filter((v): v is NonNullable<typeof v> => v !== null), runningItems: arrayValue(value, ['runningItems', 'running_items']).map(job).filter((v): v is NonNullable<typeof v> => v !== null), recentResults: arrayValue(value, ['recentResults', 'recent_results']).map(result).filter((v): v is NonNullable<typeof v> => v !== null), updatedAt: stringValue(value, ['updatedAt', 'updated_at'], empty.updatedAt) }
+}
+
 function normalizeSourceDeleteQueueJob(value: unknown): SourceDeleteQueueJob | null {
   if (!isRecord(value)) {
     return null
@@ -2071,6 +2081,7 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
   onRouteActivation?: (actionRoute?: string) => void
   onSourceSyncQueueChanged?: (status: SourceSyncQueueStatus) => void
   onSourceDeleteQueueChanged?: (status: SourceDeleteQueueStatus) => void
+  onMediaPathMigrationQueueChanged?: (status: MediaPathMigrationQueueStatus) => void
   onImportQueueChanged?: (status: ImportQueueStatus) => void
   onConnectorRuntimeChanged?: () => void
   onRuntimeLogAppended?: (entry: RuntimeLogEntry) => void
@@ -2090,6 +2101,9 @@ export async function subscribeToDesktopRuntimeEvents(handlers: {
     }),
     listen(DESKTOP_SOURCE_DELETE_QUEUE_CHANGED_EVENT_NAME, (event) => {
       handlers.onSourceDeleteQueueChanged?.(normalizeSourceDeleteQueueStatus(event.payload))
+    }),
+    listen(DESKTOP_MEDIA_PATH_MIGRATION_QUEUE_CHANGED_EVENT_NAME, (event) => {
+      handlers.onMediaPathMigrationQueueChanged?.(normalizeMediaPathMigrationQueueStatus(event.payload))
     }),
     listen(DESKTOP_IMPORT_QUEUE_CHANGED_EVENT_NAME, (event) => {
       handlers.onImportQueueChanged?.(normalizeImportQueueStatus(event.payload))
@@ -3008,6 +3022,14 @@ export async function changeSourceMediaPath(
       { source_ids: sourceIds, target_base_path: targetBasePath, move_media: moveMedia },
     ),
   )
+}
+
+export async function enqueueSourceMediaPathMigration(sourceIds: string[], targetBasePath: string): Promise<MediaPathMigrationQueueStatus> {
+  const result = await invoke<unknown>('enqueue_source_media_path_migration', buildInvokeArgs({ sourceIds, targetBasePath }, { source_ids: sourceIds, target_base_path: targetBasePath }))
+  return normalizeMediaPathMigrationQueueStatus(result)
+}
+export async function loadMediaPathMigrationQueueStatus(): Promise<MediaPathMigrationQueueStatus> {
+  return normalizeMediaPathMigrationQueueStatus(await invoke<unknown>('media_path_migration_queue_status'))
 }
 
 export interface BatchEditorIntent {

@@ -151,6 +151,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         39,
         include_str!("../../migrations/0039_provider_sync_resume_schema_repair.sql"),
     ),
+    (
+        40,
+        include_str!("../../migrations/0040_media_path_migration_queue.sql"),
+    ),
 ];
 
 const PROVIDER_SYNC_RESUME_SCHEMA: &str =
@@ -330,7 +334,9 @@ mod tests {
         {
             let connection = open_connection(&path).expect("first open");
             let applied: i64 = connection
-                .query_row("SELECT count(*) FROM schema_migrations", [], |row| row.get(0))
+                .query_row("SELECT count(*) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
                 .expect("migration ledger populated");
             assert!(applied >= 1, "migrations should run on the first open");
         }

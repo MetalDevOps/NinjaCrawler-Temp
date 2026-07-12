@@ -16,6 +16,7 @@ const bridgeMocks = vi.hoisted(() => ({
   loadSourceSyncQueueStatus: vi.fn(),
   loadWorkspaceSnapshot: vi.fn(),
   loadMediaThumbnailQueueStatus: vi.fn(),
+  loadMediaPathMigrationQueueStatus: vi.fn(),
   enqueueMediaThumbnailGeneration: vi.fn(),
   openConnectorDebugWindow: vi.fn(),
   subscribeToDesktopRuntimeEvents: vi.fn(),
@@ -118,6 +119,17 @@ describe('SourceSyncQueueWindowPage', () => {
       completedCount: 0,
       failedCount: 0,
       queuedItems: [],
+      recentResults: [],
+      updatedAt: '',
+    })
+    bridgeMocks.loadMediaPathMigrationQueueStatus.mockResolvedValue({
+      queuedCount: 0,
+      runningCount: 0,
+      completedCount: 0,
+      failedCount: 0,
+      totalCount: 0,
+      queuedItems: [],
+      runningItems: [],
       recentResults: [],
       updatedAt: '',
     })
