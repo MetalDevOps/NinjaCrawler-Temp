@@ -142,9 +142,8 @@ fn run_job(mut job: MediaThumbnailQueueItem) {
                 let path = pending.lock().ok().and_then(|mut paths| paths.pop_front());
                 let Some(path) = path else { break };
                 set_current_file(&source_id, &path);
-                let generated =
-                    workspace_repository::ensure_video_thumbnail(Path::new(&path)).is_some();
-                record_file_result(&source_id, generated);
+                let outcome = workspace_repository::generate_media_thumbnail(Path::new(&path));
+                record_file_result(&source_id, outcome);
             });
         }
     });
@@ -176,17 +175,26 @@ fn set_current_file(source_id: &str, path: &str) {
     }
 }
 
-fn record_file_result(source_id: &str, generated: bool) {
+fn record_file_result(
+    source_id: &str,
+    outcome: workspace_repository::MediaThumbnailGenerationOutcome,
+) {
     if let Ok(mut queue) = state().lock() {
         if let Some(active) = queue
             .active
             .as_mut()
             .filter(|job| job.source_id == source_id)
         {
-            if generated {
-                active.generated += 1;
-            } else {
-                active.failed += 1;
+            match outcome {
+                workspace_repository::MediaThumbnailGenerationOutcome::Generated => {
+                    active.generated += 1;
+                }
+                workspace_repository::MediaThumbnailGenerationOutcome::NotNeeded => {
+                    active.skipped_existing += 1;
+                }
+                workspace_repository::MediaThumbnailGenerationOutcome::Failed => {
+                    active.failed += 1;
+                }
             }
             active.files_processed += 1;
             active.progress_percent =
