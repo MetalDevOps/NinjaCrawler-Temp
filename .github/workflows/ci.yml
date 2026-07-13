@@ -91,6 +91,12 @@ jobs:
           pwsh
           -File Tools/Test-NinjaCrawlerReleasePackaging.ps1
 
+      - name: Test release automation configuration
+        shell: pwsh
+        run: >
+          pwsh
+          -File Tools/Test-ReleaseAutomation.ps1
+
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 

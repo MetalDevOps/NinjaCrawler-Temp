@@ -293,6 +293,24 @@ jobs:
             throw "README update PR merge failed."
           }
 
+      - name: Reconcile recovered release PR label
+        if: ${{ inputs.sha != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          $pending = gh pr list --repo ${{ github.repository }} --base main --state closed `
+            --label 'autorelease: pending' --json number,mergeCommit `
+            --jq ".[] | select(.mergeCommit.oid == `"$env:RELEASE_SHA`") | .number"
+          foreach ($pr in @($pending)) {
+            if ($pr) {
+              gh pr edit $pr --repo ${{ github.repository }} `
+                --remove-label 'autorelease: pending' `
+                --add-label 'autorelease: tagged'
+            }
+          }
+
       - name: Re-anchor release-please
         # The git tag now exists (the publish step above created it). The
         # release-please run triggered by the release-PR merge already opened the
@@ -311,7 +329,7 @@ jobs:
         run: |
           $stale = gh pr list --repo ${{ github.repository }} --base main --state open `
             --json number,headRefName `
-            --jq '.[] | select(.headRefName | startswith("release-please--")) | .number'
+            --jq '.[] | select(.headRefName | endswith("--components--ninjacrawler")) | .number'
           foreach ($pr in @($stale)) {
             if ($pr) {
               Write-Host "Closing stale release PR #$pr (opened before the tag existed)."

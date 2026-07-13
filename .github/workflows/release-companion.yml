@@ -26,6 +26,8 @@ on:
 
 permissions:
   contents: write
+  actions: write
+  pull-requests: write
 
 concurrency:
   group: release-companion-${{ inputs.tag }}
@@ -117,3 +119,39 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Companion GitHub Release publication failed."
           }
+
+      - name: Reconcile recovered Companion release PR label
+        if: ${{ inputs.sha != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          RELEASE_SHA: ${{ inputs.sha }}
+        run: |
+          $pending = gh pr list --repo ${{ github.repository }} --base main --state closed `
+            --label 'autorelease: pending' --json number,mergeCommit `
+            --jq ".[] | select(.mergeCommit.oid == `"$env:RELEASE_SHA`") | .number"
+          foreach ($pr in @($pending)) {
+            if ($pr) {
+              gh pr edit $pr --repo ${{ github.repository }} `
+                --remove-label 'autorelease: pending' `
+                --add-label 'autorelease: tagged'
+            }
+          }
+
+      - name: Re-anchor Companion release-please
+        if: success()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          $stale = gh pr list --repo ${{ github.repository }} --base main --state open `
+            --json number,headRefName `
+            --jq '.[] | select(.headRefName | endswith("--components--companion")) | .number'
+          foreach ($pr in @($stale)) {
+            if ($pr) {
+              Write-Host "Closing stale Companion release PR #$pr opened before the tag existed."
+              gh pr close $pr --repo ${{ github.repository }} `
+                --comment "Superseded by the Companion release workflow after publishing ${{ steps.version.outputs.tag }}."
+            }
+          }
+          gh workflow run release-please.yml --repo ${{ github.repository }} --ref main
