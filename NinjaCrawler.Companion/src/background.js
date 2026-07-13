@@ -3,6 +3,7 @@ import {
   detectTargetFromUrl,
   downloadTarget,
   loadContext,
+  resolveLiveTabUrl,
   syncSource,
 } from './core.js'
 import { captureAccountFromTab } from './accountCapture.js'
@@ -66,15 +67,17 @@ async function initializeBadgeFeedback() {
 async function refreshBadge(tab) {
   if (!tab?.id) return
 
-  const detected = detectProfileFromUrl(tab.url)
-  const target = detectTargetFromUrl(tab.url)
+  const liveUrl = await resolveLiveTabUrl(tab)
+
+  const detected = detectProfileFromUrl(liveUrl)
+  const target = detectTargetFromUrl(liveUrl)
   if (!detected) {
     await clearBadge(tab.id)
     return
   }
 
   try {
-    const context = await loadContext(tab.url)
+    const context = await loadContext(liveUrl)
     const compatibility = context.companionCompatibility
     if (compatibility?.status === 'incompatible') {
       await safeAction(() => chrome.action.setBadgeText({ tabId: tab.id, text: '!' }))
@@ -130,12 +133,13 @@ async function runActiveTabCommand(command, commandTab) {
   if (!tab?.id) return
 
   try {
-    const detected = detectProfileFromUrl(tab.url)
+    const liveUrl = await resolveLiveTabUrl(tab)
+    const detected = detectProfileFromUrl(liveUrl)
     if (!detected) {
       throw new Error('Open a supported profile or story first.')
     }
 
-    const context = await loadContext(tab.url)
+    const context = await loadContext(liveUrl)
     const existing = context.existingSource
     if (!existing) {
       throw new Error(`${detected.handle} is not added to NinjaCrawler.`)
@@ -149,7 +153,7 @@ async function runActiveTabCommand(command, commandTab) {
     }
 
     if (command === 'download-story') {
-      const target = context.detectedTarget ?? detectTargetFromUrl(tab.url)
+      const target = context.detectedTarget ?? detectTargetFromUrl(liveUrl)
       if (!target) {
         throw new Error('The active tab is not a supported story URL.')
       }
