@@ -35,8 +35,8 @@ foreach ($requiredFragment in @(
     }
 }
 
-if (-not $appReleaseWorkflow.Contains('endswith("--components--ninjacrawler")')) {
-    throw "App release re-anchoring must only close the app release PR."
+if (-not $appReleaseWorkflow.Contains('startswith("release-please--")')) {
+    throw "App release re-anchoring must regenerate every PR that shares the release manifest."
 }
 if (-not $appReleaseWorkflow.Contains('Reconcile recovered release PR label')) {
     throw "App release recovery must reconcile the pending release PR label."
@@ -45,11 +45,11 @@ if (-not $appReleaseWorkflow.Contains('Reconcile recovered release PR label')) {
 foreach ($requiredFragment in @(
     'Re-anchor Companion release-please',
     'Reconcile recovered Companion release PR label',
-    'endswith("--components--companion")',
+    'startswith("release-please--")',
     'gh workflow run release-please.yml'
 )) {
     if (-not $companionReleaseWorkflow.Contains($requiredFragment)) {
-        throw "Companion release workflow is missing isolated re-anchoring: $requiredFragment"
+        throw "Companion release workflow is missing shared-manifest re-anchoring: $requiredFragment"
     }
 }
 
