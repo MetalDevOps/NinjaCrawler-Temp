@@ -160,7 +160,9 @@ fn generate_media_thumbnails_parallel(
                 scope.spawn(move || {
                     chunk
                         .iter()
-                        .filter_map(|path| generate(Path::new(path)).map(|thumb| (path.clone(), thumb)))
+                        .filter_map(|path| {
+                            generate(Path::new(path)).map(|thumb| (path.clone(), thumb))
+                        })
                         .collect::<Vec<_>>()
                 })
             })
@@ -199,6 +201,32 @@ pub(super) fn is_thumbnailable_image(path: &Path) -> bool {
         Some("jpg" | "jpeg" | "png" | "webp")
     )
 }
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MediaThumbnailGenerationOutcome {
+    Generated,
+    NotNeeded,
+    Failed,
+}
+
+pub(crate) fn generate_media_thumbnail(source: &Path) -> MediaThumbnailGenerationOutcome {
+    if is_thumbnailable_image(source) {
+        return match generate_image_thumbnail(source) {
+            Some(ImageThumbnailGeneration::Generated(_)) => {
+                MediaThumbnailGenerationOutcome::Generated
+            }
+            Some(ImageThumbnailGeneration::NotNeeded) => MediaThumbnailGenerationOutcome::NotNeeded,
+            None => MediaThumbnailGenerationOutcome::Failed,
+        };
+    }
+
+    if ensure_video_thumbnail(source).is_some() {
+        MediaThumbnailGenerationOutcome::Generated
+    } else {
+        MediaThumbnailGenerationOutcome::Failed
+    }
+}
+
 pub fn media_thumbnail_source_seed(source_id: &str) -> Result<(String, String), String> {
     with_workspace(|connection, _| {
         connection
@@ -311,6 +339,11 @@ pub(crate) fn ensure_video_thumbnail(source: &Path) -> Option<String> {
 }
 const MEDIA_IMAGE_THUMB_MAX_DIMENSION: u32 = 480;
 const MEDIA_IMAGE_THUMB_JPEG_QUALITY: u8 = 80;
+enum ImageThumbnailGeneration {
+    Generated(String),
+    NotNeeded,
+}
+
 /// Gera (ou reaproveita) um thumb jpg ~480px de uma FOTO, em `.thumbs/` ao lado
 /// da mídia — mesma convenção dos thumbs de vídeo, mas via crate `image` (fotos
 /// não precisam de ffmpeg). Sem os thumbs, o webview decodifica cada foto em
@@ -323,14 +356,16 @@ const MEDIA_IMAGE_THUMB_JPEG_QUALITY: u8 = 80;
 /// 480px (senão `thumbnail()` faria upscale, gerando um thumb maior que o
 /// original). Invalida por mtime; `None` quando o arquivo sumiu ou o formato
 /// não é decodificável (gif/bmp → o front cai no arquivo original).
-pub(crate) fn ensure_image_thumbnail(source: &Path) -> Option<String> {
+fn generate_image_thumbnail(source: &Path) -> Option<ImageThumbnailGeneration> {
     fs::metadata(source).ok()?;
     let output = video_thumbnail_path(source)?;
     let thumbs_dir = output.parent()?;
     fs::create_dir_all(thumbs_dir).ok()?;
     let source_name = source.file_name()?.to_string_lossy();
     if media_thumbnail_is_current(source) {
-        return Some(output.to_string_lossy().to_string());
+        return Some(ImageThumbnailGeneration::Generated(
+            output.to_string_lossy().to_string(),
+        ));
     }
     let _ = fs::remove_file(&output);
 
@@ -347,7 +382,7 @@ pub(crate) fn ensure_image_thumbnail(source: &Path) -> Option<String> {
     if decoded.width() <= MEDIA_IMAGE_THUMB_MAX_DIMENSION
         && decoded.height() <= MEDIA_IMAGE_THUMB_MAX_DIMENSION
     {
-        return None;
+        return Some(ImageThumbnailGeneration::NotNeeded);
     }
     let thumbnail = decoded.thumbnail(
         MEDIA_IMAGE_THUMB_MAX_DIMENSION,
@@ -381,9 +416,18 @@ pub(crate) fn ensure_image_thumbnail(source: &Path) -> Option<String> {
         let _ = fs::remove_file(&temp_output);
     }
     if output.is_file() {
-        Some(output.to_string_lossy().to_string())
+        Some(ImageThumbnailGeneration::Generated(
+            output.to_string_lossy().to_string(),
+        ))
     } else {
         None
+    }
+}
+
+pub(crate) fn ensure_image_thumbnail(source: &Path) -> Option<String> {
+    match generate_image_thumbnail(source)? {
+        ImageThumbnailGeneration::Generated(path) => Some(path),
+        ImageThumbnailGeneration::NotNeeded => None,
     }
 }
 pub(super) fn ensure_provider_deleted_media_table(connection: &Connection) -> Result<(), String> {

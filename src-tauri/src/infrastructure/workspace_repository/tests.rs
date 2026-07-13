@@ -3712,6 +3712,36 @@ fn is_thumbnailable_image_covers_supported_formats_only() {
 }
 
 #[test]
+fn queued_media_thumbnail_generation_dispatches_images_without_ffmpeg() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let large = temp_dir.path().join("large.jpg");
+    image::RgbaImage::from_pixel(900, 1200, image::Rgba([20, 40, 60, 255]))
+        .save_with_format(&large, image::ImageFormat::Png)
+        .expect("large source image");
+    assert_eq!(
+        generate_media_thumbnail(&large),
+        MediaThumbnailGenerationOutcome::Generated
+    );
+    assert!(video_thumbnail_path(&large).unwrap().is_file());
+
+    let small = temp_dir.path().join("small.png");
+    image::RgbaImage::from_pixel(320, 240, image::Rgba([1, 2, 3, 255]))
+        .save_with_format(&small, image::ImageFormat::Png)
+        .expect("small source image");
+    assert_eq!(
+        generate_media_thumbnail(&small),
+        MediaThumbnailGenerationOutcome::NotNeeded
+    );
+
+    let invalid = temp_dir.path().join("invalid.webp");
+    fs::write(&invalid, b"not an image").expect("invalid source image");
+    assert_eq!(
+        generate_media_thumbnail(&invalid),
+        MediaThumbnailGenerationOutcome::Failed
+    );
+}
+
+#[test]
 fn ensure_avatar_thumbnail_returns_none_for_undecodable_input() {
     let (_temp_dir, layout) = create_test_layout();
     let original_path = layout.media_root.join(PROFILE_PICTURE_FILE_NAME);

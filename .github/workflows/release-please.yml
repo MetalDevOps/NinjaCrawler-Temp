@@ -23,6 +23,20 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      recover_package:
+        description: Recover a merged release whose manifest version has no tag
+        required: false
+        type: choice
+        default: none
+        options:
+          - none
+          - app
+          - companion
+      recover_sha:
+        description: Commit SHA containing the version to recover (defaults to main)
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -33,8 +47,52 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      - name: Recover untagged merged release
+        id: recovery
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_package != 'none' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECOVER_PACKAGE: ${{ inputs.recover_package }}
+          RECOVER_SHA: ${{ inputs.recover_sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$RECOVER_PACKAGE" = "app" ]; then
+            version="$(gh api "repos/${{ github.repository }}/contents/.release-please-manifest.json?ref=$RECOVER_SHA" --jq '.content' | base64 --decode | jq -r '.["."]')"
+            tag="v$version"
+            workflow="release.yml"
+            title="NinjaCrawler $version"
+          else
+            version="$(gh api "repos/${{ github.repository }}/contents/.release-please-manifest.json?ref=$RECOVER_SHA" --jq '.content' | base64 --decode | jq -r '.["NinjaCrawler.Companion"]')"
+            tag="companion-v$version"
+            workflow="release-companion.yml"
+            title="NinjaCrawler Companion $version"
+          fi
+
+          if gh api "repos/${{ github.repository }}/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::Release tag $tag already exists; recovery is not required."
+            exit 1
+          fi
+
+          if ! gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --repo "${{ github.repository }}" \
+              --target "$RECOVER_SHA" \
+              --title "$title" \
+              --notes "Recovery build for merged release $tag." \
+              --draft
+          fi
+
+          gh workflow run "$workflow" \
+            --repo "${{ github.repository }}" \
+            --ref main \
+            -f tag="$tag" \
+            -f sha="$RECOVER_SHA"
+          echo "requested=true" >> "$GITHUB_OUTPUT"
+
       - name: Run release-please
         id: release
+        if: ${{ steps.recovery.outputs.requested != 'true' }}
         uses: googleapis/release-please-action@v5
         with:
           # PAT so release-please can open its release PR. The default
@@ -67,3 +125,23 @@ jobs:
           --ref main
           -f tag=${{ steps.release.outputs['NinjaCrawler.Companion--tag_name'] }}
           -f sha=${{ steps.release.outputs['NinjaCrawler.Companion--sha'] }}
+
+      - name: Reject untagged merged release PRs
+        if: ${{ steps.recovery.outputs.requested != 'true' && steps.release.outputs.release_created != 'true' && steps.release.outputs['NinjaCrawler.Companion--release_created'] != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pending="$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --base main \
+            --state closed \
+            --label 'autorelease: pending' \
+            --json number,mergedAt,url \
+            --jq '[.[] | select(.mergedAt != null)]')"
+          count="$(jq 'length' <<< "$pending")"
+          if [ "$count" -gt 0 ]; then
+            jq -r '.[] | "::error::Merged release PR #\(.number) is still untagged: \(.url)"' <<< "$pending"
+            echo "Run this workflow manually with recover_package set to the affected package."
+            exit 1
+          fi
