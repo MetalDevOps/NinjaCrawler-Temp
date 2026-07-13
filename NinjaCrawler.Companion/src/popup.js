@@ -14,6 +14,7 @@ import {
   loadContexts,
   loadHealth,
   previewAccount,
+  resolveLiveTabUrl,
   syncSource,
 } from './core.js'
 
@@ -94,6 +95,8 @@ async function boot() {
   const activeTabPromise = chrome.tabs.query({ active: true, currentWindow: true })
   const allTabsPromise = chrome.tabs.query({})
   const [tab] = await activeTabPromise
+  const liveUrl = await resolveLiveTabUrl(tab)
+  if (tab) tab.url = liveUrl
   state.tab = tab
   state.detected = detectProfileFromUrl(tab?.url)
   state.provider = state.detected?.provider ?? detectProviderFromUrl(tab?.url)

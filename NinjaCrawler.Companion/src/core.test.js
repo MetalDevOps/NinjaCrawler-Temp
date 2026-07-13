@@ -6,6 +6,7 @@ import {
   loadContext,
   loadContexts,
   loadHealth,
+  resolveLiveTabUrl,
 } from './core.js'
 
 describe('collectDetectedProfiles', () => {
@@ -58,6 +59,49 @@ describe('detectTargetFromUrl', () => {
 
   it('ignores a plain TikTok profile', () => {
     expect(detectTargetFromUrl('https://www.tiktok.com/@sgaby.tls')).toBeNull()
+  })
+})
+
+describe('resolveLiveTabUrl', () => {
+  it('prefers the live Instagram story URL exposed by the page over the stale tab URL', async () => {
+    const previousChrome = globalThis.chrome
+    globalThis.chrome = {
+      scripting: {
+        executeScript: vi.fn().mockResolvedValue([{
+          result: [
+            'https://www.instagram.com/stories/someone/',
+            'https://www.instagram.com/stories/someone/1234567890/',
+          ],
+        }]),
+      },
+    }
+
+    try {
+      await expect(resolveLiveTabUrl({
+        id: 7,
+        url: 'https://www.instagram.com/someone/',
+      })).resolves.toBe('https://www.instagram.com/stories/someone/1234567890/')
+    } finally {
+      if (previousChrome) globalThis.chrome = previousChrome
+      else delete globalThis.chrome
+    }
+  })
+
+  it('falls back to the tab URL when page inspection is unavailable', async () => {
+    const previousChrome = globalThis.chrome
+    globalThis.chrome = {
+      scripting: {
+        executeScript: vi.fn().mockRejectedValue(new Error('Cannot access page')),
+      },
+    }
+
+    try {
+      await expect(resolveLiveTabUrl({ id: 7, url: 'https://x.com/someone' }))
+        .resolves.toBe('https://x.com/someone')
+    } finally {
+      if (previousChrome) globalThis.chrome = previousChrome
+      else delete globalThis.chrome
+    }
   })
 })
 

@@ -62,6 +62,27 @@ export function detectProviderFromUrl(rawUrl) {
   return null
 }
 
+export async function resolveLiveTabUrl(tab) {
+  if (!tab?.id || !globalThis.chrome?.scripting?.executeScript) return tab?.url ?? ''
+
+  try {
+    const [{ result: candidates = [] } = {}] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => [
+        globalThis.location?.href,
+        document.querySelector('link[rel="canonical"]')?.href,
+        document.querySelector('meta[property="og:url"]')?.content,
+      ].filter(Boolean),
+    })
+    return candidates.find((candidate) => detectTargetFromUrl(candidate))
+      ?? candidates[0]
+      ?? tab.url
+      ?? ''
+  } catch {
+    return tab.url ?? ''
+  }
+}
+
 export function detectTargetFromUrl(rawUrl) {
   if (!rawUrl) return null
 
