@@ -1,16 +1,19 @@
 # Linux cross-build contract
 
-## Current hosted path
+## Current Linux path
 
-NinjaCrawler targets Windows x64 while CI builds on GitHub-hosted `ubuntu-latest`.
-`Tools/Build-NinjaCrawler.ps1` keeps the Visual Studio/MSVC path for local Windows
-builds and selects `cargo-xwin --target x86_64-pc-windows-msvc` on Linux.
+NinjaCrawler targets Windows x64 while trusted CI and release builds run on the
+ephemeral Proxmox JIT Linux runner. External pull requests retain a
+GitHub-hosted `ubuntu-latest` fallback. `Tools/Build-NinjaCrawler.ps1` keeps the
+Visual Studio/MSVC path for local Windows builds and selects
+`cargo-xwin --target x86_64-pc-windows-msvc` on Linux.
 
 The fixed Linux toolchain is:
 
 - Rust stable and `cargo-xwin` 0.22.0;
 - Node.js 22;
 - LLVM/Clang/LLD 18.1.3 and NSIS 3.09 from Ubuntu 24.04;
+- `libayatana-appindicator3-dev`, required by Tauri when `tray-icon` is enabled;
 - PowerShell Core for repository scripts.
 
 The target directory defaults to
@@ -62,11 +65,62 @@ dispatches against any other ref. The release workflow separates concerns:
 2. `publish` downloads that artifact and is the only job granted
    `contents: write`.
 
-`Windows cross-build validation` is a main-only manual dispatch on the Proxmox
-JIT runner. It builds portable plus NSIS, rejects ZIP/MSI artifacts, validates
-checksums, and never publishes a release. The official release build remains on
-`ubuntu-latest` until this complete NSIS validation succeeds on the JIT runner;
-publication remains hosted regardless of the build runner.
+The official build job and its persistent compilation cache run on the JIT
+runner. Publication remains hosted regardless of the build runner. Because the
+LXC enforces `no_new_privs`, jobs cannot use `sudo` to mutate the image. The
+golden must include `pkg-config` and `libayatana-appindicator3-dev`; workflows
+verify both and fail before compilation with an explicit image-contract error.
+
+## Release Please publication gate
+
+A draft GitHub Release does not create its Git tag. Release Please therefore
+must not generate the next release PR while a manifest version exists only as
+an unpublished draft. The workflow applies two gates:
+
+1. immediately after Release Please creates a release, all pre-tag release PRs
+   are closed before the artifact build is dispatched;
+2. every later `main` run detects a draft whose tag is still absent, closes any
+   release PR that reappeared, and pauses that package until publication or an
+   explicit recovery completes.
+
+After successful publication, the hosted publish job closes all shared-manifest
+release PRs and dispatches Release Please again. At that point the tag exists,
+so the regenerated PR uses the correct changelog boundary. A failed build leaves
+the draft available for recovery but cannot leave an inflated next-release PR
+open.
+
+## End-to-end release validation
+
+`Windows release E2E validation` is a manual workflow and uses the same split as
+production. The publication job is additionally restricted to `refs/heads/main`
+so a workflow modified in another branch cannot receive `contents: write`:
+
+1. a read-only JIT job runs lint/tests, builds portable plus NSIS, packages the
+   four exact release assets, validates PE x64 and SHA-256, and uploads an
+   Actions artifact;
+2. a hosted job with temporary `contents: write` downloads that artifact,
+   verifies it, creates an isolated published prerelease, downloads every asset
+   again, compares the bytes and checksums, then deletes the prerelease and tag
+   in an `always()` cleanup step.
+
+The test tag is `release-e2e-v<app-version>-<run-id>-<attempt>`. It exposes the
+version actually compiled while remaining outside the production `vX.Y.Z`
+namespace, and it never updates the README, manifest, changelog, back-sync
+branch, or latest-release marker. Before compilation, the workflow requires
+`package.json`, the Tauri config, `Cargo.toml`, and the application entry in
+`Cargo.lock` to carry the same version. Promotion automation also refuses to
+move an older `develop` version over a newer `main` version; the draft release
+state must be synced back into `develop` first.
+
+Linux cross-compilation can emit diagnostics owned by upstream tools. The build
+passes `/ignore:4099` only to the Windows cross-linker because the MSVC runtime
+archives reference Microsoft-internal PDB files that are not distributed by
+`cargo-xwin`; those missing debug symbols do not affect the optimized PE. The
+Tauri experimental-cross-compilation notice, its unsigned-installer notice,
+and NSIS warning 5202 about `-OUTPUTCHARSET` on non-Win32 hosts remain expected
+tool capability notices. They do not indicate Rust source warnings. Signing is
+a separate release capability and must use an explicit trusted signing command
+and certificate rather than hiding that notice.
 
 ## Proxmox JIT validation
 
@@ -81,7 +135,8 @@ pull requests, but never for PRs from unknown author associations.
 Each trusted workflow has a separate stable `CARGO_TARGET_DIR`, protected by
 workflow concurrency without cancellation so two compiler processes cannot
 write to the same target at the same time. The workspace and JIT runner remain
-disposable. Manual JIT jobs explicitly require `refs/heads/main`.
+disposable. Manual publication validation is available only through
+`workflow_dispatch` in this repository.
 
 Keep the orchestrator in ephemeral mode, inspect the uploaded PE and checksum
 on Windows, and confirm that each JIT LXC is removed while only the intended
@@ -101,3 +156,23 @@ Keep external and public-fork PR cross-builds hosted, and keep publication on a
 GitHub-hosted job. A Windows machine remains required for the final runtime
 check: launch both distribution forms, complete first-run preparation, restart
 without downloads, and exercise all three connectors.
+
+## Rollout and rollback
+
+Before recovering an official draft, run the E2E workflow with publication
+enabled from `main` and require both jobs to pass. Confirm that no
+`release-e2e-*` release or tag survives cleanup. Then dispatch
+`release-please.yml` with
+`recover_package=app` and the original merged release SHA.
+
+Before the first E2E run, update golden 9101 as root, install `pkg-config` and
+`libayatana-appindicator3-dev`, verify
+`pkg-config --exists ayatana-appindicator3-0.1`, and publish the refreshed
+template through the orchestrator's normal golden-image rollout. Do not relax
+the LXC `no_new_privs` policy to make package installation work inside a job.
+
+If JIT builds regress, change only the production `build.runs-on` value back to
+`ubuntu-latest` and restore its toolchain setup/cache steps; keep the hosted
+publish job and publication gates unchanged. If publication verification fails,
+do not publish the draft manually: retain the draft, repair the workflow, rerun
+the E2E test, and use explicit recovery.

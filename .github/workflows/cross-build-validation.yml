@@ -1,23 +1,35 @@
-name: Windows cross-build validation
+name: Windows release E2E validation
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_test_release:
+        description: Publish, verify, and delete an isolated GitHub prerelease
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: ninjacrawler-proxmox-validation
+  group: ninjacrawler-proxmox-release-e2e
   cancel-in-progress: false
 
 jobs:
   build:
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: ${{ github.repository == 'MetalDevOps/NinjaCrawler' }}
     runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]
     timeout-minutes: 60
+    permissions:
+      contents: read
     env:
       WINDOWS_TARGET: x86_64-pc-windows-msvc
-      CARGO_TARGET_DIR: /cache/target/ninjacrawler-validation
+      CARGO_TARGET_DIR: /cache/target/ninjacrawler-release-e2e
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      artifact: ${{ steps.identity.outputs.artifact }}
+      test_tag: ${{ steps.identity.outputs.test_tag }}
 
     steps:
       - name: Check out repository
@@ -42,31 +54,50 @@ jobs:
             command -v "$tool"
           done
 
+      - name: Verify Linux tray bundle prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v pkg-config >/dev/null; then
+            echo "The golden image must include pkg-config and libayatana-appindicator3-dev." >&2
+            exit 1
+          fi
+          if ! pkg-config --exists ayatana-appindicator3-0.1; then
+            echo "The golden image must include libayatana-appindicator3-dev." >&2
+            exit 1
+          fi
+          pkg-config --modversion ayatana-appindicator3-0.1
+          dpkg-query --show --showformat='${Version}\n' libayatana-appindicator3-dev
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Resolve version
-        id: version
+      - name: Resolve validation identity
+        id: identity
         shell: pwsh
         run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $version = & Tools/Test-NinjaCrawlerVersion.ps1
           "version=$version" >> $env:GITHUB_OUTPUT
+          "artifact=NinjaCrawler-$version-release-e2e-${{ github.run_id }}" >> $env:GITHUB_OUTPUT
+          "test_tag=release-e2e-v$version-${{ github.run_id }}-${{ github.run_attempt }}" >> $env:GITHUB_OUTPUT
 
       - name: Build portable and NSIS
         shell: pwsh
+        env:
+          NINJACRAWLER_RELEASE_BUILD: "true"
+          NINJACRAWLER_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+          NINJACRAWLER_BUILD_SHA: ${{ github.sha }}
         run: >
           pwsh -File Tools/Build-NinjaCrawler.ps1
           -Configuration Release
-          -SkipLint
-          -SkipTests
 
       - name: Generate validation changelog
         shell: pwsh
         run: |
           pwsh -File Tools/New-NinjaCrawlerChangelog.ps1 `
-            -Version "${{ steps.version.outputs.version }}" `
+            -Version "${{ steps.identity.outputs.version }}" `
             -CurrentRef "${{ github.sha }}" `
-            -CurrentTag "validation-${{ github.run_id }}" `
+            -CurrentTag "${{ steps.identity.outputs.test_tag }}" `
             -Repository "${{ github.repository }}" `
             -OutputPath "artifacts/CHANGELOG.md"
 
@@ -74,26 +105,118 @@ jobs:
         shell: pwsh
         run: >
           pwsh -File Tools/Package-NinjaCrawlerRelease.ps1
-          -Version ${{ steps.version.outputs.version }}
+          -Version ${{ steps.identity.outputs.version }}
           -TargetTriple x86_64-pc-windows-msvc
           -ChangelogPath artifacts/CHANGELOG.md
           -SkipCompanion
 
-      - name: Reject legacy or bundled runtime artifacts
+      - name: Verify packaged release assets
         shell: bash
         run: |
           set -euo pipefail
-          if find release -maxdepth 1 -type f \( -name '*.zip' -o -name '*.msi' \) | grep -q .; then
-            echo "Legacy ZIP or MSI artifact found." >&2
+          version='${{ steps.identity.outputs.version }}'
+          expected="$(printf '%s\n' \
+            CHANGELOG.md \
+            "NinjaCrawler-$version-windows-x64-portable.exe" \
+            "NinjaCrawler-$version-windows-x64-setup.exe" \
+            SHA256SUMS.txt | sort)"
+          actual="$(find release -maxdepth 1 -type f -printf '%f\n' | sort)"
+          if [ "$actual" != "$expected" ]; then
+            echo "Unexpected release assets:" >&2
+            printf '%s\n' "$actual" >&2
             exit 1
           fi
           test ! -e connectors/bootstrap
           (cd release && sha256sum --check SHA256SUMS.txt)
+          llvm-readobj-18 --file-headers "release/NinjaCrawler-$version-windows-x64-portable.exe" |
+            grep -F 'IMAGE_FILE_MACHINE_AMD64'
 
-      - name: Upload validation artifacts
+      - name: Upload release candidate artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: NinjaCrawler-${{ steps.version.outputs.version }}-cross-build-validation
+          name: ${{ steps.identity.outputs.artifact }}
           path: release/*
           if-no-files-found: error
           retention-days: 7
+
+  publish-and-verify:
+    name: Publish and verify isolated prerelease
+    if: ${{ inputs.publish_test_release && github.ref == 'refs/heads/main' }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TEST_TAG: ${{ needs.build.outputs.test_tag }}
+      VERSION: ${{ needs.build.outputs.version }}
+
+    steps:
+      - name: Download release candidate artifact
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: release
+
+      - name: Verify artifact before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum --check SHA256SUMS.txt)
+
+      - name: Publish isolated prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$TEST_TAG" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "NinjaCrawler release E2E ${{ github.run_id }}" \
+            --notes "Ephemeral end-to-end artifact publication test. This release is deleted automatically." \
+            --prerelease \
+            release/*
+
+      - name: Download and verify published assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          state="$(gh release view "$TEST_TAG" --repo "${{ github.repository }}" \
+            --json isDraft,isPrerelease,tagName --jq '[.isDraft,.isPrerelease,.tagName] | @tsv')"
+          expected_state=$'false\ttrue\t'"$TEST_TAG"
+          test "$state" = "$expected_state"
+
+          expected="$(printf '%s\n' \
+            CHANGELOG.md \
+            "NinjaCrawler-$VERSION-windows-x64-portable.exe" \
+            "NinjaCrawler-$VERSION-windows-x64-setup.exe" \
+            SHA256SUMS.txt | sort)"
+          published="$(gh release view "$TEST_TAG" --repo "${{ github.repository }}" \
+            --json assets --jq '.assets[].name' | sort)"
+          test "$published" = "$expected"
+
+          mkdir downloaded
+          gh release download "$TEST_TAG" --repo "${{ github.repository }}" --dir downloaded
+          (cd downloaded && sha256sum --check SHA256SUMS.txt)
+          for asset in $expected; do
+            cmp "release/$asset" "downloaded/$asset"
+          done
+
+      - name: Delete isolated prerelease and tag
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release delete "$TEST_TAG" --repo "${{ github.repository }}" --yes --cleanup-tag || true
+          if gh api "repos/${{ github.repository }}/git/ref/tags/$TEST_TAG" >/dev/null 2>&1; then
+            gh api --method DELETE "repos/${{ github.repository }}/git/refs/tags/$TEST_TAG"
+          fi
+          if gh release view "$TEST_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Temporary release $TEST_TAG still exists after cleanup." >&2
+            exit 1
+          fi
+          if gh api "repos/${{ github.repository }}/git/ref/tags/$TEST_TAG" >/dev/null 2>&1; then
+            echo "Temporary tag $TEST_TAG still exists after cleanup." >&2
+            exit 1
+          fi

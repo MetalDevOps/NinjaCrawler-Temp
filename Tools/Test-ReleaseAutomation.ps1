@@ -14,6 +14,8 @@ $promotionWorkflowPath = Join-Path $repoRoot ".github\workflows\release-pr.yml"
 $promoteMergeWorkflowPath = Join-Path $repoRoot ".github\workflows\promote-merge.yml"
 $releaseBackSyncWorkflowPath = Join-Path $repoRoot ".github\workflows\release-back-sync.yml"
 $cargoLockPath = Join-Path $repoRoot "src-tauri\Cargo.lock"
+$buildScriptPath = Join-Path $repoRoot "Tools\Build-NinjaCrawler.ps1"
+$versionTestPath = Join-Path $repoRoot "Tools\Test-NinjaCrawlerVersion.ps1"
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $companionConfig = Get-Content -LiteralPath $companionConfigPath -Raw | ConvertFrom-Json
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
@@ -26,6 +28,8 @@ $promotionWorkflow = Get-Content -LiteralPath $promotionWorkflowPath -Raw
 $promoteMergeWorkflow = Get-Content -LiteralPath $promoteMergeWorkflowPath -Raw
 $releaseBackSyncWorkflow = Get-Content -LiteralPath $releaseBackSyncWorkflowPath -Raw
 $cargoLock = Get-Content -LiteralPath $cargoLockPath -Raw
+$buildScript = Get-Content -LiteralPath $buildScriptPath -Raw
+$versionTest = Get-Content -LiteralPath $versionTestPath -Raw
 
 foreach ($releaseConfig in @($config, $companionConfig)) {
     if ($releaseConfig.'separate-pull-requests' -ne $true) {
@@ -79,7 +83,14 @@ foreach ($requiredFragment in @(
     'Recover untagged merged release',
     'GH_TOKEN: ${{ secrets.GH_TOKEN }}',
     'Reject untagged merged release PRs',
-    "--label 'autorelease: pending'"
+    "--label 'autorelease: pending'",
+    'Detect unpublished draft releases',
+    'Test-UnpublishedDraft',
+    'Quarantine pre-tag release pull requests',
+    "always() && steps.recovery.outputs.requested != 'true'",
+    'Release Please remains paused until publication or explicit recovery completes',
+    "steps.unpublished.outputs.app != 'true'",
+    "steps.unpublished.outputs.companion != 'true'"
 )) {
     if (-not $workflow.Contains($requiredFragment)) {
         throw "Release workflow is missing recovery safeguard: $requiredFragment"
@@ -113,6 +124,16 @@ foreach ($requiredFragment in @(
     }
 }
 
+$e2eSections = [regex]::Split($crossBuildValidationWorkflow, '(?m)^  publish-and-verify:\s*$')
+if ($e2eSections.Count -ne 2) {
+    throw "Release E2E workflow must have one isolated publish-and-verify job."
+}
+foreach ($forbiddenFragment in @('contents: write', 'runs-on: ubuntu-latest', 'secrets.')) {
+    if ($e2eSections[0].Contains($forbiddenFragment)) {
+        throw "Release E2E build job contains privileged hosted-publish behavior: $forbiddenFragment"
+    }
+}
+
 foreach ($requiredFragment in @(
     'Stage versioned portable',
     'NinjaCrawler-$version-windows-x64-portable.exe',
@@ -123,9 +144,21 @@ foreach ($requiredFragment in @(
     '["self-hosted","proxmox-lxc","crossbuild","mode-ephemeral"]',
     '["ubuntu-latest"]',
     'CARGO_TARGET_DIR=/cache/target/ninjacrawler-ci'
+    'Validate app version manifests'
+    'Tools/Test-NinjaCrawlerVersion.ps1'
 )) {
     if (-not $ciWorkflow.Contains($requiredFragment)) {
         throw "CI is missing versioned portable artifact staging: $requiredFragment"
+    }
+}
+
+$appReleaseSections = [regex]::Split($appReleaseWorkflow, '(?m)^  publish:\s*$')
+if ($appReleaseSections.Count -ne 2) {
+    throw "App release workflow must have one isolated publish job."
+}
+foreach ($forbiddenFragment in @('contents: write', 'runs-on: ubuntu-latest', 'actions/cache@', 'secrets.')) {
+    if ($appReleaseSections[0].Contains($forbiddenFragment)) {
+        throw "App release build job contains privileged or hosted-only behavior: $forbiddenFragment"
     }
 }
 
@@ -149,13 +182,22 @@ foreach ($requiredFragment in @(
 foreach ($requiredFragment in @(
     'workflow_dispatch:',
     'runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]',
-    "github.ref == 'refs/heads/main'",
     'persist-credentials: false',
     'cancel-in-progress: false',
-    'CARGO_TARGET_DIR: /cache/target/ninjacrawler-validation',
+    'CARGO_TARGET_DIR: /cache/target/ninjacrawler-release-e2e',
     'Tools/Build-NinjaCrawler.ps1',
-    '-SkipTests',
-    '(cd release && sha256sum --check SHA256SUMS.txt)'
+    'libayatana-appindicator3-dev',
+    'Publish and verify isolated prerelease',
+    "inputs.publish_test_release && github.ref == 'refs/heads/main'",
+    'runs-on: ubuntu-latest',
+    'contents: write',
+    'gh release create "$TEST_TAG"',
+    'gh release download "$TEST_TAG"',
+    'gh release delete "$TEST_TAG"',
+    '--cleanup-tag',
+    '(cd downloaded && sha256sum --check SHA256SUMS.txt)'
+    'release-e2e-v$version-'
+    'Tools/Test-NinjaCrawlerVersion.ps1'
 )) {
     if (-not $crossBuildValidationWorkflow.Contains($requiredFragment)) {
         throw "Full cross-build validation workflow is missing a safety invariant: $requiredFragment"
@@ -166,8 +208,7 @@ foreach ($forbiddenFragment in @(
     'pull_request:',
     '-PortableOnly',
     'secrets.',
-    'contents: write',
-    'runs-on: ubuntu-latest'
+    'sudo apt-get'
 )) {
     if ($crossBuildValidationWorkflow.Contains($forbiddenFragment)) {
         throw "Full cross-build validation workflow contains forbidden behavior: $forbiddenFragment"
@@ -191,8 +232,24 @@ if (-not $appReleaseWorkflow.Contains('startswith("release-please--")')) {
 if (-not $appReleaseWorkflow.Contains('Reconcile recovered release PR label')) {
     throw "App release recovery must reconcile the pending release PR label."
 }
-if (-not $appReleaseWorkflow.Contains("'src-tauri/Cargo.lock' = `$cargoLockVersion")) {
-    throw "App release validation must reject a stale Cargo lockfile version."
+if (-not $appReleaseWorkflow.Contains('Tools/Test-NinjaCrawlerVersion.ps1 -ExpectedVersion $version')) {
+    throw "App release validation must enforce the shared version contract."
+}
+
+foreach ($requiredFragment in @(
+    'src-tauri/Cargo.lock'
+    'src-tauri/Cargo.toml'
+    'src-tauri/tauri.conf.json'
+    'package.json'
+)) {
+    if (-not $versionTest.Contains($requiredFragment)) {
+        throw "Version contract test is missing a release manifest: $requiredFragment"
+    }
+}
+
+if (-not $buildScript.Contains('link-arg=/ignore:4099') -or
+    -not $buildScript.Contains('CrossLinkerPolicy=ignore-msvc-runtime-pdb-warning-4099')) {
+    throw "Linux MSVC cross-builds must suppress the unavailable runtime PDB warning."
 }
 
 foreach ($requiredFragment in @(
@@ -219,10 +276,30 @@ foreach ($requiredFragment in @(
 foreach ($requiredFragment in @(
     'git log --no-merges --oneline',
     'Closing empty release PR',
-    'gh pr close "$existing"'
+    'gh pr close "$existing"',
+    'Refusing to promote $HEAD version $head_version over newer $BASE version $base_version.',
+    'sort -V'
 )) {
     if (-not $promotionWorkflow.Contains($requiredFragment)) {
         throw "Promotion workflow does not close merge-only release PRs: $requiredFragment"
+    }
+}
+
+if ($appReleaseWorkflow.Contains('sudo apt-get')) {
+    throw "The immutable JIT release job must not mutate the golden image with apt."
+}
+
+foreach ($requiredFragment in @(
+    'runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]',
+    'CARGO_TARGET_DIR: /cache/target/ninjacrawler-release',
+    'Verify self-hosted golden toolchain',
+    'libayatana-appindicator3-dev',
+    'publish:',
+    'runs-on: ubuntu-latest',
+    'contents: write'
+)) {
+    if (-not $appReleaseWorkflow.Contains($requiredFragment)) {
+        throw "App release workflow is missing the split self-hosted build/hosted publish contract: $requiredFragment"
     }
 }
 
