@@ -49,18 +49,24 @@ not supported.
 
 ## Workflow security boundary
 
-Every pull request executes the hosted cross-build with read-only repository
-permissions, `persist-credentials: false`, and no build secrets. The release
-workflow separates concerns:
+Pull requests opened by repository owners, organization members, or explicit
+collaborators execute the cross-build on the ephemeral Proxmox JIT runner. PRs
+from every other author association, including public forks, remain on the
+hosted runner. Both paths use read-only repository permissions,
+`persist-credentials: false`, and no build secrets. Trusted pushes to `main` and
+manual CI dispatches also use the JIT runner; the job is skipped for manual
+dispatches against any other ref. The release workflow separates concerns:
 
 1. `build` checks out the trusted release ref, compiles and uploads an Actions
    artifact with read-only permissions;
 2. `publish` downloads that artifact and is the only job granted
    `contents: write`.
 
-`Windows cross-build validation` is a manual dispatch that builds portable plus
-NSIS, rejects ZIP/MSI artifacts, validates checksums, and never publishes a
-release.
+`Windows cross-build validation` is a main-only manual dispatch on the Proxmox
+JIT runner. It builds portable plus NSIS, rejects ZIP/MSI artifacts, validates
+checksums, and never publishes a release. The official release build remains on
+`ubuntu-latest` until this complete NSIS validation succeeds on the JIT runner;
+publication remains hosted regardless of the build runner.
 
 ## Proxmox JIT validation
 
@@ -68,29 +74,30 @@ release.
 first trusted LXC test. It requests the labels `self-hosted`, `proxmox-lxc`,
 `crossbuild`, and `mode-ephemeral`, verifies the preinstalled golden toolchain,
 and builds only the thin versioned portable executable. It does not download or
-package connector runtimes, receive repository secrets, publish a release, or
-run for pull requests.
+package connector runtimes, receive repository secrets, or publish a release.
+The regular CI workflow may use the same runner labels for trusted collaborator
+pull requests, but never for PRs from unknown author associations.
 
-The persistent cache uses a stable `CARGO_TARGET_DIR`, protected by workflow
-concurrency without cancellation so two compiler processes cannot write to it
-at the same time. The workspace and JIT runner remain disposable. The workflow
-must first exist on the default branch before GitHub allows a manual dispatch.
+Each trusted workflow has a separate stable `CARGO_TARGET_DIR`, protected by
+workflow concurrency without cancellation so two compiler processes cannot
+write to the same target at the same time. The workspace and JIT runner remain
+disposable. Manual JIT jobs explicitly require `refs/heads/main`.
 
-During the first test, keep the orchestrator in ephemeral mode with one active
-runner, verify that the job is accepted only for `workflow_dispatch`, inspect
-the uploaded PE and checksum on Windows, and confirm that the LXC is removed
-while only the intended build cache persists.
+Keep the orchestrator in ephemeral mode, inspect the uploaded PE and checksum
+on Windows, and confirm that each JIT LXC is removed while only the intended
+build cache persists. The orchestrator must accept CI jobs only when GitHub has
+already selected the restricted self-hosted labels.
 
 The LXC must never:
 
-- execute pull-request or fork code;
+- execute PR code from an author association other than `OWNER`, `MEMBER`, or
+  `COLLABORATOR`;
 - receive publication credentials or repository secrets;
 - publish a GitHub Release;
 - belong to a runner group shared with unrelated repositories or workflows.
 
-Restrict its runner group to this repository and the trusted validation
-workflow. Keep the hosted PR cross-build unchanged and keep publication on a
-GitHub-hosted job until the JIT path has been measured and validated. A Windows
-machine remains required for the final runtime check: launch both distribution
-forms, complete first-run preparation, restart without downloads, and exercise
-all three connectors.
+Restrict its runner group to this repository and the intended build workflows.
+Keep external and public-fork PR cross-builds hosted, and keep publication on a
+GitHub-hosted job. A Windows machine remains required for the final runtime
+check: launch both distribution forms, complete first-run preparation, restart
+without downloads, and exercise all three connectors.
