@@ -52,6 +52,49 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Detect unpublished draft releases
+        id: unpublished
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.recover_package == 'none' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          $manifest = Get-Content .release-please-manifest.json -Raw | ConvertFrom-Json
+
+          function Test-UnpublishedDraft([string]$Tag) {
+            & git show-ref --verify --quiet "refs/tags/$Tag"
+            if ($LASTEXITCODE -eq 0) {
+              return $false
+            }
+
+            $draft = & gh release view $Tag --repo ${{ github.repository }} `
+              --json isDraft --jq '.isDraft' 2>$null
+            return $LASTEXITCODE -eq 0 -and $draft -eq 'true'
+          }
+
+          $appTag = "v$($manifest.'.')"
+          $companionTag = "companion-v$($manifest.'NinjaCrawler.Companion')"
+          $appBlocked = Test-UnpublishedDraft $appTag
+          $companionBlocked = Test-UnpublishedDraft $companionTag
+
+          "app=$($appBlocked.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "app_tag=$appTag" >> $env:GITHUB_OUTPUT
+          "companion=$($companionBlocked.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "companion_tag=$companionTag" >> $env:GITHUB_OUTPUT
+
+          if ($appBlocked -or $companionBlocked) {
+            Write-Warning "Release Please is paused while an existing draft release is unpublished."
+            $stale = gh pr list --repo ${{ github.repository }} --base main --state open `
+              --json number,headRefName `
+              --jq '.[] | select(.headRefName | startswith("release-please--")) | .number'
+            foreach ($pr in @($stale)) {
+              if ($pr) {
+                gh pr close $pr --repo ${{ github.repository }} `
+                  --comment "Closed automatically: a merged release is still a draft without a Git tag. Release Please remains paused until publication or explicit recovery completes."
+              }
+            }
+          }
+
       - name: Recover untagged merged release
         id: recovery
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_package != 'none' }}
@@ -99,7 +142,7 @@ jobs:
 
       - name: Detect Companion release intent
         id: companion_intent
-        if: ${{ steps.recovery.outputs.requested != 'true' }}
+        if: ${{ steps.recovery.outputs.requested != 'true' && steps.unpublished.outputs.companion != 'true' }}
         shell: pwsh
         run: |
           $tag = git tag --list 'companion-v*' --sort=-version:refname |
@@ -121,7 +164,7 @@ jobs:
 
       - name: Run release-please for the app
         id: app_release
-        if: ${{ steps.recovery.outputs.requested != 'true' }}
+        if: ${{ steps.recovery.outputs.requested != 'true' && steps.unpublished.outputs.app != 'true' }}
         uses: googleapis/release-please-action@v5
         with:
           # PAT so release-please can open its release PR. The default
@@ -132,7 +175,7 @@ jobs:
           manifest-file: .release-please-manifest.json
 
       - name: Close metadata-only Companion release pull requests
-        if: ${{ steps.companion_intent.outputs.eligible == 'false' }}
+        if: ${{ steps.unpublished.outputs.companion != 'true' && steps.companion_intent.outputs.eligible == 'false' }}
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
@@ -148,7 +191,7 @@ jobs:
 
       - name: Run release-please for the Companion
         id: companion_release
-        if: ${{ steps.recovery.outputs.requested != 'true' && steps.companion_intent.outputs.eligible == 'true' }}
+        if: ${{ steps.recovery.outputs.requested != 'true' && steps.unpublished.outputs.companion != 'true' && steps.companion_intent.outputs.eligible == 'true' }}
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.GH_TOKEN }}
@@ -156,7 +199,7 @@ jobs:
           manifest-file: .release-please-manifest.json
 
       - name: Validate Companion release pull request
-        if: ${{ steps.recovery.outputs.requested != 'true' && steps.companion_intent.outputs.eligible == 'true' }}
+        if: ${{ steps.recovery.outputs.requested != 'true' && steps.unpublished.outputs.companion != 'true' && steps.companion_intent.outputs.eligible == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
@@ -178,6 +221,43 @@ jobs:
               --comment "Closed automatically: the release notes reference no commit that changes functional Companion files."
             exit 1
           fi
+
+      - name: Quarantine pre-tag release pull requests
+        if: ${{ always() && steps.recovery.outputs.requested != 'true' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          $manifest = Get-Content .release-please-manifest.json -Raw | ConvertFrom-Json
+          $tags = @(
+            "v$($manifest.'.')"
+            "companion-v$($manifest.'NinjaCrawler.Companion')"
+          )
+          $unpublished = @($tags | Where-Object {
+            $tag = $_
+            & git show-ref --verify --quiet "refs/tags/$tag"
+            if ($LASTEXITCODE -eq 0) {
+              return $false
+            }
+            $draft = & gh release view $tag --repo ${{ github.repository }} `
+              --json isDraft --jq '.isDraft' 2>$null
+            return $LASTEXITCODE -eq 0 -and $draft -eq 'true'
+          })
+          if ($unpublished.Count -eq 0) {
+            Write-Host "No unpublished draft release requires PR quarantine."
+            exit 0
+          }
+
+          $stale = gh pr list --repo ${{ github.repository }} --base main --state open `
+            --json number,headRefName `
+            --jq '.[] | select(.headRefName | startswith("release-please--")) | .number'
+          foreach ($pr in @($stale)) {
+            if ($pr) {
+              Write-Host "Closing pre-tag release PR #$pr."
+              gh pr close $pr --repo ${{ github.repository }} `
+                --comment "Closed automatically: the preceding release is still an unpublished draft. A new release PR will be generated only after its Git tag exists."
+            }
+          }
 
       - name: Trigger Windows release build
         # The root package (".") keeps the unprefixed outputs.
@@ -204,7 +284,7 @@ jobs:
           -f sha=${{ steps.companion_release.outputs['NinjaCrawler.Companion--sha'] }}
 
       - name: Reject untagged merged release PRs
-        if: ${{ steps.recovery.outputs.requested != 'true' && steps.app_release.outputs.release_created != 'true' && steps.companion_release.outputs['NinjaCrawler.Companion--release_created'] != 'true' }}
+        if: ${{ steps.recovery.outputs.requested != 'true' && steps.unpublished.outputs.app != 'true' && steps.unpublished.outputs.companion != 'true' && steps.app_release.outputs.release_created != 'true' && steps.companion_release.outputs['NinjaCrawler.Companion--release_created'] != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -222,3 +302,8 @@ jobs:
             echo "Run this workflow manually with recover_package set to the affected package."
             exit 1
           fi
+
+      - name: Report paused publication state
+        if: ${{ steps.unpublished.outputs.app == 'true' || steps.unpublished.outputs.companion == 'true' }}
+        run: |
+          echo "::warning::Release Please is paused until the draft release is published or recovered. App=${{ steps.unpublished.outputs.app_tag }}, Companion=${{ steps.unpublished.outputs.companion_tag }}."
