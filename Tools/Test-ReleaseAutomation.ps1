@@ -3,30 +3,57 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $configPath = Join-Path $repoRoot "release-please-config.json"
+$companionConfigPath = Join-Path $repoRoot "release-please-companion-config.json"
 $workflowPath = Join-Path $repoRoot ".github\workflows\release-please.yml"
+$ciWorkflowPath = Join-Path $repoRoot ".github\workflows\ci.yml"
 $appReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release.yml"
 $companionReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release-companion.yml"
 $promotionWorkflowPath = Join-Path $repoRoot ".github\workflows\release-pr.yml"
 $releaseBackSyncWorkflowPath = Join-Path $repoRoot ".github\workflows\release-back-sync.yml"
 $cargoLockPath = Join-Path $repoRoot "src-tauri\Cargo.lock"
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+$companionConfig = Get-Content -LiteralPath $companionConfigPath -Raw | ConvertFrom-Json
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
+$ciWorkflow = Get-Content -LiteralPath $ciWorkflowPath -Raw
 $appReleaseWorkflow = Get-Content -LiteralPath $appReleaseWorkflowPath -Raw
 $companionReleaseWorkflow = Get-Content -LiteralPath $companionReleaseWorkflowPath -Raw
 $promotionWorkflow = Get-Content -LiteralPath $promotionWorkflowPath -Raw
 $releaseBackSyncWorkflow = Get-Content -LiteralPath $releaseBackSyncWorkflowPath -Raw
 $cargoLock = Get-Content -LiteralPath $cargoLockPath -Raw
 
-if ($config.'separate-pull-requests' -ne $true) {
-    throw "Release Please packages must use separate pull requests."
+foreach ($releaseConfig in @($config, $companionConfig)) {
+    if ($releaseConfig.'separate-pull-requests' -ne $true) {
+        throw "Release Please packages must use separate pull requests."
+    }
 }
 
-foreach ($packagePath in @('.', 'NinjaCrawler.Companion')) {
-    $package = $config.packages.$packagePath
+foreach ($packageEntry in @(
+    @{ Config = $config; Path = '.' },
+    @{ Config = $companionConfig; Path = 'NinjaCrawler.Companion' }
+)) {
+    $packagePath = $packageEntry.Path
+    $package = $packageEntry.Config.packages.$packagePath
     $pattern = $package.'pull-request-title-pattern'
     if (-not $pattern.Contains('${component}') -or -not $pattern.Contains('${version}')) {
         throw "Release PR title for '$packagePath' must preserve component and version."
     }
+}
+
+if (@($config.packages.PSObject.Properties).Count -ne 1 -or
+    -not $config.packages.PSObject.Properties['.']) {
+    throw "The app Release Please config must contain only the root package."
+}
+if (@($companionConfig.packages.PSObject.Properties).Count -ne 1 -or
+    -not $companionConfig.packages.PSObject.Properties['NinjaCrawler.Companion']) {
+    throw "The Companion Release Please config must contain only the Companion package."
+}
+if ('NinjaCrawler.Companion' -notin @($config.packages.'.'.'exclude-paths')) {
+    throw "The root package must exclude Companion commits from app releases."
+}
+$appSections = $config.'changelog-sections' | ConvertTo-Json -Compress
+$companionSections = $companionConfig.'changelog-sections' | ConvertTo-Json -Compress
+if ($appSections -ne $companionSections) {
+    throw "App and Companion Release Please configs must use the same changelog sections."
 }
 
 $cargoLockUpdater = @($config.packages.'.'.'extra-files') | Where-Object {
@@ -50,6 +77,33 @@ foreach ($requiredFragment in @(
 )) {
     if (-not $workflow.Contains($requiredFragment)) {
         throw "Release workflow is missing recovery safeguard: $requiredFragment"
+    }
+}
+
+foreach ($requiredFragment in @(
+    'Detect Companion release intent',
+    'id: app_release',
+    'config-file: release-please-config.json',
+    'id: companion_release',
+    'config-file: release-please-companion-config.json',
+    'Close metadata-only Companion release pull requests',
+    'Test-ReleaseCandidateIntegrity.ps1',
+    'steps.companion_intent.outputs.eligible',
+    "git tag --list 'companion-v*' --sort=-version:refname"
+)) {
+    if (-not $workflow.Contains($requiredFragment)) {
+        throw "Release Please workflow is missing package release-intent isolation: $requiredFragment"
+    }
+}
+
+foreach ($requiredFragment in @(
+    'pull-requests: read',
+    'Validate Companion release candidate',
+    'Test-ReleaseCandidateIntegrity.ps1',
+    'Test-ReleaseCandidateIntegrity.Tests.ps1'
+)) {
+    if (-not $ciWorkflow.Contains($requiredFragment)) {
+        throw "CI is missing release candidate integrity coverage: $requiredFragment"
     }
 }
 
@@ -109,7 +163,8 @@ foreach ($requiredFragment in @(
     '^(companion-)?v[0-9]+\.[0-9]+\.[0-9]+$',
     'git merge-base --is-ancestor',
     '--base "$BASE" --head "$branch"',
-    '--merge --delete-branch'
+    '--merge --delete-branch',
+    '--subject "chore(release): sync published version back to develop"'
 )) {
     if (-not $releaseBackSyncWorkflow.Contains($requiredFragment)) {
         throw "Release back-sync workflow is missing a safety invariant: $requiredFragment"
