@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -30,6 +31,23 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+
+      - name: Validate Companion release candidate
+        if: ${{ github.event_name == 'pull_request' && github.head_ref == 'release-please--branches--main--components--companion' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          $bodyPath = Join-Path $env:RUNNER_TEMP "companion-release-pr.md"
+          gh pr view $env:PR_NUMBER --repo ${{ github.repository }} `
+            --json body --jq '.body' | Set-Content -LiteralPath $bodyPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not read Companion release PR #$env:PR_NUMBER."
+          }
+          & Tools/Test-ReleaseCandidateIntegrity.ps1 `
+            -PullRequestBodyPath $bodyPath `
+            -RequireFunctionalChange
 
       - name: Detect changes under src-tauri / connectors
         id: filter
@@ -96,6 +114,12 @@ jobs:
         run: >
           pwsh
           -File Tools/Test-ReleaseAutomation.ps1
+
+      - name: Test release candidate integrity
+        shell: pwsh
+        run: >
+          pwsh
+          -File Tools/Test-ReleaseCandidateIntegrity.Tests.ps1
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high

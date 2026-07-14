@@ -47,6 +47,11 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      - name: Check out release history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
       - name: Recover untagged merged release
         id: recovery
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.recover_package != 'none' }}
@@ -92,8 +97,30 @@ jobs:
             -f sha="$RECOVER_SHA"
           echo "requested=true" >> "$GITHUB_OUTPUT"
 
-      - name: Run release-please
-        id: release
+      - name: Detect Companion release intent
+        id: companion_intent
+        if: ${{ steps.recovery.outputs.requested != 'true' }}
+        shell: pwsh
+        run: |
+          $tag = git tag --list 'companion-v*' --sort=-version:refname |
+            Select-Object -First 1
+          if (-not $tag) {
+            throw "Cannot validate Companion release intent because no published Companion tag exists."
+          }
+
+          $resultJson = & Tools/Test-ReleaseCandidateIntegrity.ps1 `
+            -CommitRange "$tag..HEAD"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Companion release intent validation failed."
+          }
+          $result = $resultJson | ConvertFrom-Json
+          $eligible = if ($result.eligible) { 'true' } else { 'false' }
+          Write-Host "Companion release eligible: $eligible"
+          Write-Host "Functional commits: $(@($result.functional_commits).Count)"
+          "eligible=$eligible" >> $env:GITHUB_OUTPUT
+
+      - name: Run release-please for the app
+        id: app_release
         if: ${{ steps.recovery.outputs.requested != 'true' }}
         uses: googleapis/release-please-action@v5
         with:
@@ -104,32 +131,80 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      - name: Close metadata-only Companion release pull requests
+        if: ${{ steps.companion_intent.outputs.eligible == 'false' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -euo pipefail
+          stale="$(gh pr list --repo "${{ github.repository }}" --base main --state open \
+            --json number,headRefName \
+            --jq '.[] | select(.headRefName == "release-please--branches--main--components--companion") | .number')"
+          for pr in $stale; do
+            echo "Closing metadata-only Companion release PR #$pr."
+            gh pr close "$pr" --repo "${{ github.repository }}" \
+              --comment "Closed automatically: no functional Companion files changed since the latest companion tag. Version metadata and changelog synchronization do not qualify as a release."
+          done
+
+      - name: Run release-please for the Companion
+        id: companion_release
+        if: ${{ steps.recovery.outputs.requested != 'true' && steps.companion_intent.outputs.eligible == 'true' }}
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          config-file: release-please-companion-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Validate Companion release pull request
+        if: ${{ steps.recovery.outputs.requested != 'true' && steps.companion_intent.outputs.eligible == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          set -euo pipefail
+          pr="$(gh pr list --repo "${{ github.repository }}" --base main --state open \
+            --json number,headRefName \
+            --jq '.[] | select(.headRefName == "release-please--branches--main--components--companion") | .number' \
+            | head -n 1)"
+          if [ -z "$pr" ]; then
+            echo "No open Companion release PR to validate."
+            exit 0
+          fi
+
+          body_file="$RUNNER_TEMP/companion-release-pr.md"
+          gh pr view "$pr" --repo "${{ github.repository }}" --json body --jq '.body' > "$body_file"
+          if ! pwsh -File Tools/Test-ReleaseCandidateIntegrity.ps1 \
+            -PullRequestBodyPath "$body_file" -RequireFunctionalChange; then
+            gh pr close "$pr" --repo "${{ github.repository }}" \
+              --comment "Closed automatically: the release notes reference no commit that changes functional Companion files."
+            exit 1
+          fi
+
       - name: Trigger Windows release build
         # The root package (".") keeps the unprefixed outputs.
-        if: ${{ steps.release.outputs.release_created == 'true' }}
+        if: ${{ steps.app_release.outputs.release_created == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
           gh workflow run release.yml
           --repo ${{ github.repository }}
           --ref main
-          -f tag=${{ steps.release.outputs.tag_name }}
-          -f sha=${{ steps.release.outputs.sha }}
+          -f tag=${{ steps.app_release.outputs.tag_name }}
+          -f sha=${{ steps.app_release.outputs.sha }}
 
       - name: Trigger Companion release build
         # The Companion package uses path-prefixed outputs (<path>--...).
-        if: ${{ steps.release.outputs['NinjaCrawler.Companion--release_created'] == 'true' }}
+        if: ${{ steps.companion_release.outputs['NinjaCrawler.Companion--release_created'] == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
           gh workflow run release-companion.yml
           --repo ${{ github.repository }}
           --ref main
-          -f tag=${{ steps.release.outputs['NinjaCrawler.Companion--tag_name'] }}
-          -f sha=${{ steps.release.outputs['NinjaCrawler.Companion--sha'] }}
+          -f tag=${{ steps.companion_release.outputs['NinjaCrawler.Companion--tag_name'] }}
+          -f sha=${{ steps.companion_release.outputs['NinjaCrawler.Companion--sha'] }}
 
       - name: Reject untagged merged release PRs
-        if: ${{ steps.recovery.outputs.requested != 'true' && steps.release.outputs.release_created != 'true' && steps.release.outputs['NinjaCrawler.Companion--release_created'] != 'true' }}
+        if: ${{ steps.recovery.outputs.requested != 'true' && steps.app_release.outputs.release_created != 'true' && steps.companion_release.outputs['NinjaCrawler.Companion--release_created'] != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
