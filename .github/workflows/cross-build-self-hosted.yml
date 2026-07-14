@@ -13,11 +13,12 @@ concurrency:
 jobs:
   build:
     name: Windows portable cross-build
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]
     timeout-minutes: 45
     env:
       WINDOWS_TARGET: x86_64-pc-windows-msvc
-      CARGO_TARGET_DIR: /cache/target/ninjacrawler-cross-build
+      CARGO_TARGET_DIR: /cache/target/ninjacrawler-smoke
 
     steps:
       - name: Check out repository

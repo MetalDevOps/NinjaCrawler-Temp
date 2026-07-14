@@ -19,7 +19,13 @@ if ($CompanionOnly -and $SkipCompanion) {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $releaseRoot = if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
-    $path = Join-Path $repoRoot "src-tauri/target"
+    $path = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+        Join-Path $repoRoot "src-tauri/target"
+    } elseif ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+        [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $repoRoot $env:CARGO_TARGET_DIR))
+    }
     if (-not [string]::IsNullOrWhiteSpace($TargetTriple)) {
         $path = Join-Path $path $TargetTriple
     }

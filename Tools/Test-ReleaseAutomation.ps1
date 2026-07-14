@@ -7,6 +7,7 @@ $companionConfigPath = Join-Path $repoRoot "release-please-companion-config.json
 $workflowPath = Join-Path $repoRoot ".github\workflows\release-please.yml"
 $ciWorkflowPath = Join-Path $repoRoot ".github\workflows\ci.yml"
 $selfHostedWorkflowPath = Join-Path $repoRoot ".github\workflows\cross-build-self-hosted.yml"
+$crossBuildValidationWorkflowPath = Join-Path $repoRoot ".github\workflows\cross-build-validation.yml"
 $appReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release.yml"
 $companionReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release-companion.yml"
 $promotionWorkflowPath = Join-Path $repoRoot ".github\workflows\release-pr.yml"
@@ -18,6 +19,7 @@ $companionConfig = Get-Content -LiteralPath $companionConfigPath -Raw | ConvertF
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $ciWorkflow = Get-Content -LiteralPath $ciWorkflowPath -Raw
 $selfHostedWorkflow = Get-Content -LiteralPath $selfHostedWorkflowPath -Raw
+$crossBuildValidationWorkflow = Get-Content -LiteralPath $crossBuildValidationWorkflowPath -Raw
 $appReleaseWorkflow = Get-Content -LiteralPath $appReleaseWorkflowPath -Raw
 $companionReleaseWorkflow = Get-Content -LiteralPath $companionReleaseWorkflowPath -Raw
 $promotionWorkflow = Get-Content -LiteralPath $promotionWorkflowPath -Raw
@@ -114,7 +116,13 @@ foreach ($requiredFragment in @(
 foreach ($requiredFragment in @(
     'Stage versioned portable',
     'NinjaCrawler-$version-windows-x64-portable.exe',
-    'steps.portable.outputs.path'
+    'steps.portable.outputs.path',
+    "github.event_name == 'pull_request' || github.ref == 'refs/heads/main'",
+    '["OWNER","MEMBER","COLLABORATOR"]',
+    'github.event.pull_request.author_association',
+    '["self-hosted","proxmox-lxc","crossbuild","mode-ephemeral"]',
+    '["ubuntu-latest"]',
+    'CARGO_TARGET_DIR=/cache/target/ninjacrawler-ci'
 )) {
     if (-not $ciWorkflow.Contains($requiredFragment)) {
         throw "CI is missing versioned portable artifact staging: $requiredFragment"
@@ -124,8 +132,10 @@ foreach ($requiredFragment in @(
 foreach ($requiredFragment in @(
     'workflow_dispatch:',
     'runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]',
+    "github.ref == 'refs/heads/main'",
     'persist-credentials: false',
     'cancel-in-progress: false',
+    'CARGO_TARGET_DIR: /cache/target/ninjacrawler-smoke',
     'Tools/Build-NinjaCrawler.ps1',
     '-PortableOnly',
     'test ! -e connectors/bootstrap',
@@ -133,6 +143,34 @@ foreach ($requiredFragment in @(
 )) {
     if (-not $selfHostedWorkflow.Contains($requiredFragment)) {
         throw "Self-hosted validation workflow is missing a safety invariant: $requiredFragment"
+    }
+}
+
+foreach ($requiredFragment in @(
+    'workflow_dispatch:',
+    'runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]',
+    "github.ref == 'refs/heads/main'",
+    'persist-credentials: false',
+    'cancel-in-progress: false',
+    'CARGO_TARGET_DIR: /cache/target/ninjacrawler-validation',
+    'Tools/Build-NinjaCrawler.ps1',
+    '-SkipTests',
+    '(cd release && sha256sum --check SHA256SUMS.txt)'
+)) {
+    if (-not $crossBuildValidationWorkflow.Contains($requiredFragment)) {
+        throw "Full cross-build validation workflow is missing a safety invariant: $requiredFragment"
+    }
+}
+
+foreach ($forbiddenFragment in @(
+    'pull_request:',
+    '-PortableOnly',
+    'secrets.',
+    'contents: write',
+    'runs-on: ubuntu-latest'
+)) {
+    if ($crossBuildValidationWorkflow.Contains($forbiddenFragment)) {
+        throw "Full cross-build validation workflow contains forbidden behavior: $forbiddenFragment"
     }
 }
 
