@@ -298,6 +298,12 @@ foreach ($requiredFragment in @(
     'CARGO_TARGET_DIR: /cache/target/ninjacrawler-release',
     'Verify self-hosted golden toolchain',
     'libayatana-appindicator3-dev',
+    'Check out trusted release tooling',
+    'path: .release-tooling',
+    'path: .release-source',
+    'Overlay trusted release tooling',
+    'Package-NinjaCrawlerRelease.ps1',
+    'path: .release-source/release/*',
     'publish:',
     'runs-on: ubuntu-latest',
     'contents: write'
