@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.17.0...v0.17.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* **sync:** prevent zero-byte media artifacts ([#154](https://github.com/MetalDevOps/NinjaCrawler/issues/154)) ([5b42b5d](https://github.com/MetalDevOps/NinjaCrawler/commit/5b42b5da035459899cc892f716104f4cc9a92019))
+
 ## [0.17.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.16.1...v0.17.0) (2026-07-13)
 
 
