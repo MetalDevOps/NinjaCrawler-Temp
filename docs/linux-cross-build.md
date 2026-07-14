@@ -13,10 +13,11 @@ The fixed Linux toolchain is:
 - LLVM/Clang/LLD 18.1.3 and NSIS 3.09 from Ubuntu 24.04;
 - PowerShell Core for repository scripts.
 
-The target directory is
-`src-tauri/target/x86_64-pc-windows-msvc/release`. A full build produces the raw
-PE and an NSIS bundle. MSI is intentionally unsupported because WiX remains a
-Windows-only path.
+The target directory defaults to
+`src-tauri/target/x86_64-pc-windows-msvc/release`. When `CARGO_TARGET_DIR` is
+set, the build wrapper resolves the executable and bundles below that directory
+instead. A full build produces the raw PE and an NSIS bundle. MSI is
+intentionally unsupported because WiX remains a Windows-only path.
 
 ## Release contract
 
@@ -61,18 +62,35 @@ workflow separates concerns:
 NSIS, rejects ZIP/MSI artifacts, validates checksums, and never publishes a
 release.
 
-## Future LXC runner contract
+## Proxmox JIT validation
 
-The LXC/orchestrator integration is deliberately outside the hosted migration.
-When enabled, the orchestrator may select a trusted Linux runner or fall back to
-`ubuntu-latest`, but the LXC must never:
+`Cross-build on Proxmox JIT runner` is an isolated manual workflow for the
+first trusted LXC test. It requests the labels `self-hosted`, `proxmox-lxc`,
+`crossbuild`, and `mode-ephemeral`, verifies the preinstalled golden toolchain,
+and builds only the thin versioned portable executable. It does not download or
+package connector runtimes, receive repository secrets, publish a release, or
+run for pull requests.
+
+The persistent cache uses a stable `CARGO_TARGET_DIR`, protected by workflow
+concurrency without cancellation so two compiler processes cannot write to it
+at the same time. The workspace and JIT runner remain disposable. The workflow
+must first exist on the default branch before GitHub allows a manual dispatch.
+
+During the first test, keep the orchestrator in ephemeral mode with one active
+runner, verify that the job is accepted only for `workflow_dispatch`, inspect
+the uploaded PE and checksum on Windows, and confirm that the LXC is removed
+while only the intended build cache persists.
+
+The LXC must never:
 
 - execute pull-request or fork code;
 - receive publication credentials or repository secrets;
 - publish a GitHub Release;
 - belong to a runner group shared with unrelated repositories or workflows.
 
-Restrict its runner group to this repository and a trusted build workflow. Keep
-publication on a GitHub-hosted job. A Windows machine remains required for the
-final runtime check: launch both distribution forms, complete first-run
-preparation, restart without downloads, and exercise all three connectors.
+Restrict its runner group to this repository and the trusted validation
+workflow. Keep the hosted PR cross-build unchanged and keep publication on a
+GitHub-hosted job until the JIT path has been measured and validated. A Windows
+machine remains required for the final runtime check: launch both distribution
+forms, complete first-run preparation, restart without downloads, and exercise
+all three connectors.

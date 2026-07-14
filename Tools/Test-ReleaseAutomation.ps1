@@ -6,6 +6,7 @@ $configPath = Join-Path $repoRoot "release-please-config.json"
 $companionConfigPath = Join-Path $repoRoot "release-please-companion-config.json"
 $workflowPath = Join-Path $repoRoot ".github\workflows\release-please.yml"
 $ciWorkflowPath = Join-Path $repoRoot ".github\workflows\ci.yml"
+$selfHostedWorkflowPath = Join-Path $repoRoot ".github\workflows\cross-build-self-hosted.yml"
 $appReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release.yml"
 $companionReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release-companion.yml"
 $promotionWorkflowPath = Join-Path $repoRoot ".github\workflows\release-pr.yml"
@@ -15,6 +16,7 @@ $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $companionConfig = Get-Content -LiteralPath $companionConfigPath -Raw | ConvertFrom-Json
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $ciWorkflow = Get-Content -LiteralPath $ciWorkflowPath -Raw
+$selfHostedWorkflow = Get-Content -LiteralPath $selfHostedWorkflowPath -Raw
 $appReleaseWorkflow = Get-Content -LiteralPath $appReleaseWorkflowPath -Raw
 $companionReleaseWorkflow = Get-Content -LiteralPath $companionReleaseWorkflowPath -Raw
 $promotionWorkflow = Get-Content -LiteralPath $promotionWorkflowPath -Raw
@@ -114,6 +116,32 @@ foreach ($requiredFragment in @(
 )) {
     if (-not $ciWorkflow.Contains($requiredFragment)) {
         throw "CI is missing versioned portable artifact staging: $requiredFragment"
+    }
+}
+
+foreach ($requiredFragment in @(
+    'workflow_dispatch:',
+    'runs-on: [self-hosted, proxmox-lxc, crossbuild, mode-ephemeral]',
+    'persist-credentials: false',
+    'cancel-in-progress: false',
+    'Tools/Build-NinjaCrawler.ps1',
+    '-PortableOnly',
+    'test ! -e connectors/bootstrap',
+    'IMAGE_FILE_MACHINE_AMD64'
+)) {
+    if (-not $selfHostedWorkflow.Contains($requiredFragment)) {
+        throw "Self-hosted validation workflow is missing a safety invariant: $requiredFragment"
+    }
+}
+
+foreach ($forbiddenFragment in @(
+    'pull_request:',
+    'Prepare-ConnectorBootstrap.ps1',
+    'secrets.',
+    'contents: write'
+)) {
+    if ($selfHostedWorkflow.Contains($forbiddenFragment)) {
+        throw "Self-hosted validation workflow contains forbidden behavior: $forbiddenFragment"
     }
 }
 
