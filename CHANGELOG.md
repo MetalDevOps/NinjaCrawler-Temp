@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.2](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.19.1...v0.19.2) (2026-07-15)
+
+
+### Bug Fixes
+
+* **instagram:** restore profile note sync ([#212](https://github.com/MetalDevOps/NinjaCrawler/issues/212)) ([106b200](https://github.com/MetalDevOps/NinjaCrawler/commit/106b20082febbc9bd04a8840325293686c07e08b))
+
 ## [0.19.1](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.19.0...v0.19.1) (2026-07-15)
 
 
