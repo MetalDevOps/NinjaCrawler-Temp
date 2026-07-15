@@ -60,16 +60,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           $manifest = Get-Content .release-please-manifest.json -Raw | ConvertFrom-Json
+          $releaseJson = & gh release list --repo ${{ github.repository }} `
+            --limit 1000 --json tagName,isDraft
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not list GitHub releases.'
+          }
+          $knownReleases = @($releaseJson | ConvertFrom-Json)
 
           function Test-UnpublishedDraft([string]$Tag) {
-            & git show-ref --verify --quiet "refs/tags/$Tag"
-            if ($LASTEXITCODE -eq 0) {
+            $matchingTags = @(& git tag --list $Tag)
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not inspect git tag $Tag."
+            }
+            if ($matchingTags.Count -gt 0) {
               return $false
             }
 
-            $draft = & gh release view $Tag --repo ${{ github.repository }} `
-              --json isDraft --jq '.isDraft' 2>$null
-            return $LASTEXITCODE -eq 0 -and $draft -eq 'true'
+            $matchingReleases = @($knownReleases | Where-Object tagName -eq $Tag)
+            return $matchingReleases.Count -eq 1 -and $matchingReleases[0].isDraft
           }
 
           $appTag = "v$($manifest.'.')"
@@ -229,19 +237,27 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           $manifest = Get-Content .release-please-manifest.json -Raw | ConvertFrom-Json
+          $releaseJson = & gh release list --repo ${{ github.repository }} `
+            --limit 1000 --json tagName,isDraft
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not list GitHub releases.'
+          }
+          $knownReleases = @($releaseJson | ConvertFrom-Json)
           $tags = @(
             "v$($manifest.'.')"
             "companion-v$($manifest.'NinjaCrawler.Companion')"
           )
           $unpublished = @($tags | Where-Object {
             $tag = $_
-            & git show-ref --verify --quiet "refs/tags/$tag"
-            if ($LASTEXITCODE -eq 0) {
+            $matchingTags = @(& git tag --list $tag)
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not inspect git tag $tag."
+            }
+            if ($matchingTags.Count -gt 0) {
               return $false
             }
-            $draft = & gh release view $tag --repo ${{ github.repository }} `
-              --json isDraft --jq '.isDraft' 2>$null
-            return $LASTEXITCODE -eq 0 -and $draft -eq 'true'
+            $matchingReleases = @($knownReleases | Where-Object tagName -eq $tag)
+            return $matchingReleases.Count -eq 1 -and $matchingReleases[0].isDraft
           })
           if ($unpublished.Count -eq 0) {
             Write-Host "No unpublished draft release requires PR quarantine."

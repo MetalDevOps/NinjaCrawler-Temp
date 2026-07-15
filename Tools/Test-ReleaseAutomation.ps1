@@ -89,6 +89,10 @@ foreach ($requiredFragment in @(
     "--label 'autorelease: pending'",
     'Detect unpublished draft releases',
     'Test-UnpublishedDraft',
+    'gh release list',
+    '--json tagName,isDraft',
+    'git tag --list $Tag',
+    'knownReleases',
     'Quarantine pre-tag release pull requests',
     "always() && steps.recovery.outputs.requested != 'true'",
     'Release Please remains paused until publication or explicit recovery completes',
@@ -98,6 +102,10 @@ foreach ($requiredFragment in @(
     if (-not $workflow.Contains($requiredFragment)) {
         throw "Release workflow is missing recovery safeguard: $requiredFragment"
     }
+}
+
+if ($workflow.Contains('gh release view $Tag')) {
+    throw 'Release detection must not treat an expected missing release as a native command failure.'
 }
 
 foreach ($requiredFragment in @(
