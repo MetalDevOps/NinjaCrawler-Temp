@@ -6,6 +6,7 @@ $configPath = Join-Path $repoRoot "release-please-config.json"
 $companionConfigPath = Join-Path $repoRoot "release-please-companion-config.json"
 $workflowPath = Join-Path $repoRoot ".github\workflows\release-please.yml"
 $ciWorkflowPath = Join-Path $repoRoot ".github\workflows\ci.yml"
+$closedPrCancellationWorkflowPath = Join-Path $repoRoot ".github\workflows\cancel-closed-pr-ci.yml"
 $selfHostedWorkflowPath = Join-Path $repoRoot ".github\workflows\cross-build-self-hosted.yml"
 $crossBuildValidationWorkflowPath = Join-Path $repoRoot ".github\workflows\cross-build-validation.yml"
 $appReleaseWorkflowPath = Join-Path $repoRoot ".github\workflows\release.yml"
@@ -21,6 +22,7 @@ $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $companionConfig = Get-Content -LiteralPath $companionConfigPath -Raw | ConvertFrom-Json
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $ciWorkflow = Get-Content -LiteralPath $ciWorkflowPath -Raw
+$closedPrCancellationWorkflow = Get-Content -LiteralPath $closedPrCancellationWorkflowPath -Raw
 $selfHostedWorkflow = Get-Content -LiteralPath $selfHostedWorkflowPath -Raw
 $crossBuildValidationWorkflow = Get-Content -LiteralPath $crossBuildValidationWorkflowPath -Raw
 $appReleaseWorkflow = Get-Content -LiteralPath $appReleaseWorkflowPath -Raw
@@ -115,14 +117,57 @@ foreach ($requiredFragment in @(
 }
 
 foreach ($requiredFragment in @(
+    'actions: read',
     'pull-requests: read',
     'Validate Companion release candidate',
+    'fetch-depth: 0',
     'Test-ReleaseCandidateIntegrity.ps1',
-    'Test-ReleaseCandidateIntegrity.Tests.ps1'
+    'Test-ReleaseCandidateIntegrity.Tests.ps1',
+    'Test CI input fingerprints',
+    'Test-CIInputFingerprint.ps1',
+    'Resolve reusable promotion validation',
+    'Get-CIPromotionValidation.ps1',
+    'Frontend quality execution',
+    'Frontend quality reused'
 )) {
     if (-not $ciWorkflow.Contains($requiredFragment)) {
         throw "CI is missing release candidate integrity coverage: $requiredFragment"
     }
+}
+
+foreach ($requiredFragment in @(
+    'pull_request_target:',
+    '- closed',
+    'actions: write',
+    'pull-requests: read',
+    'Cancel active CI runs',
+    'actions/workflows/ci.yml/runs',
+    '-f branch="$HEAD_BRANCH"',
+    '-f head_sha="$HEAD_SHA"',
+    'select(.status != \"completed\")',
+    'select(.number != $PR_NUMBER)',
+    'another open pull request',
+    'actions/runs/$run_id/cancel'
+)) {
+    if (-not $closedPrCancellationWorkflow.Contains($requiredFragment)) {
+        throw "Closed PR cancellation workflow is missing a safeguard: $requiredFragment"
+    }
+}
+
+foreach ($forbiddenFragment in @(
+    'actions/checkout',
+    'contents: write',
+    'pull-requests: write',
+    'Frontend quality',
+    'Windows cross-build'
+)) {
+    if ($closedPrCancellationWorkflow.Contains($forbiddenFragment)) {
+        throw "Closed PR cancellation workflow contains unsafe or conflicting behavior: $forbiddenFragment"
+    }
+}
+
+if ($ciWorkflow -match '(?ms)pull_request:\s*.*?types:\s*.*?- closed') {
+    throw 'The CI workflow must not create replacement checks when a pull request closes.'
 }
 
 $e2eSections = [regex]::Split($crossBuildValidationWorkflow, '(?m)^  publish-and-verify:\s*$')
@@ -157,6 +202,10 @@ foreach ($requiredFragment in @(
     if (-not $ciWorkflow.Contains($requiredFragment)) {
         throw "CI is missing versioned portable artifact staging: $requiredFragment"
     }
+}
+
+if ($ciWorkflow -match '(?ms)^on:\s*.*?push:\s*\r?\n\s+branches:\s*\r?\n\s+- main') {
+    throw 'CI must not rerun after a protected pull request is merged into main.'
 }
 
 $appReleaseSections = [regex]::Split($appReleaseWorkflow, '(?m)^  publish:\s*$')

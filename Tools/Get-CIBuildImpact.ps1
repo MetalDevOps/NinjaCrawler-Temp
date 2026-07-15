@@ -88,7 +88,7 @@ $buildPatterns = @(
     '^package(-lock)?\.json$',
     '^(vite|vitest)\.config\.',
     '^tsconfig[^/]*\.json$',
-    '^Tools/(Build-NinjaCrawler|Package-NinjaCrawlerRelease|Test-NinjaCrawlerVersion)\.ps1$',
+    '^Tools/(Build-NinjaCrawler|Get-CIBuildImpact|Get-CIInputFingerprint|Get-CIPromotionValidation|Package-NinjaCrawlerRelease|Test-NinjaCrawlerVersion)\.ps1$',
     '^\.github/workflows/(ci|release|cross-build-validation|cross-build-self-hosted)\.yml$'
 )
 $buildPaths = @($paths | Where-Object {
