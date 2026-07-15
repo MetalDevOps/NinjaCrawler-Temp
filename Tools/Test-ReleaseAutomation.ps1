@@ -115,10 +115,20 @@ foreach ($requiredFragment in @(
 }
 
 foreach ($requiredFragment in @(
+    'actions: read',
     'pull-requests: read',
     'Validate Companion release candidate',
+    'fetch-depth: 0',
     'Test-ReleaseCandidateIntegrity.ps1',
-    'Test-ReleaseCandidateIntegrity.Tests.ps1'
+    'Test-ReleaseCandidateIntegrity.Tests.ps1',
+    'Test CI input fingerprints',
+    'Test-CIInputFingerprint.ps1',
+    'Resolve reusable promotion validation',
+    'Get-CIPromotionValidation.ps1',
+    'Frontend quality execution',
+    'Frontend quality reused',
+    '- closed',
+    "github.event.action != 'closed'"
 )) {
     if (-not $ciWorkflow.Contains($requiredFragment)) {
         throw "CI is missing release candidate integrity coverage: $requiredFragment"
@@ -157,6 +167,10 @@ foreach ($requiredFragment in @(
     if (-not $ciWorkflow.Contains($requiredFragment)) {
         throw "CI is missing versioned portable artifact staging: $requiredFragment"
     }
+}
+
+if ($ciWorkflow -match '(?ms)^on:\s*.*?push:\s*\r?\n\s+branches:\s*\r?\n\s+- main') {
+    throw 'CI must not rerun after a protected pull request is merged into main.'
 }
 
 $appReleaseSections = [regex]::Split($appReleaseWorkflow, '(?m)^  publish:\s*$')

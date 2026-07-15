@@ -5,12 +5,15 @@ on:
     branches:
       - main
       - develop
-  push:
-    branches:
-      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   pull-requests: read
 
@@ -21,11 +24,14 @@ concurrency:
 jobs:
   changes:
     name: Detect Windows build impact
+    if: ${{ github.event.action != 'closed' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      windows: ${{ steps.impact.outputs.windows }}
-      reason: ${{ steps.impact.outputs.reason }}
+      windows: ${{ steps.plan.outputs.windows }}
+      reason: ${{ steps.plan.outputs.reason }}
+      quality_reuse: ${{ steps.plan.outputs.quality_reuse }}
+      quality_reason: ${{ steps.plan.outputs.quality_reason }}
 
     steps:
       - name: Check out repository
@@ -55,8 +61,58 @@ jobs:
           Write-Host "Windows build required: $windows"
           Write-Host "Reason: $($result.reason)"
 
-  quality:
-    name: Frontend quality
+      - name: Resolve reusable promotion validation
+        id: plan
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPOSITORY: ${{ github.repository }}
+          WINDOWS_REQUIRED: ${{ steps.impact.outputs.windows }}
+          WINDOWS_REASON: ${{ steps.impact.outputs.reason }}
+        run: |
+          $qualityReuse = $false
+          $windowsReuse = $false
+          $qualityReason = 'No reusable validation was requested.'
+          $windowsReason = $env:WINDOWS_REASON
+
+          $isPromotion =
+            $env:EVENT_NAME -eq 'pull_request' -and
+            $env:BASE_REF -eq 'main' -and
+            $env:HEAD_REF -eq 'develop'
+
+          if ($isPromotion) {
+            $reuse = & Tools/Get-CIPromotionValidation.ps1 `
+              -Repository $env:REPOSITORY `
+              -HeadSha $env:HEAD_SHA |
+              ConvertFrom-Json
+            $qualityReuse = $reuse.qualityReuse
+            $windowsReuse = $reuse.windowsReuse
+            $qualityReason = $reuse.reason
+            if ($windowsReuse) {
+              $windowsReason = $reuse.reason
+            } elseif ($env:WINDOWS_REQUIRED -eq 'true') {
+              $windowsReason = "$($reuse.reason) Building fail-closed."
+            }
+          }
+
+          $windowsRequired = $env:WINDOWS_REQUIRED -eq 'true' -and -not $windowsReuse
+          "quality_reuse=$($qualityReuse.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "quality_reason=$qualityReason" >> $env:GITHUB_OUTPUT
+          "windows=$($windowsRequired.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "reason=$windowsReason" >> $env:GITHUB_OUTPUT
+          Write-Host "Frontend quality reuse: $qualityReuse"
+          Write-Host "Frontend reason: $qualityReason"
+          Write-Host "Windows build required: $windowsRequired"
+          Write-Host "Windows reason: $windowsReason"
+
+  quality_execution:
+    name: Frontend quality execution
+    needs: changes
+    if: ${{ needs.changes.outputs.quality_reuse != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -64,6 +120,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Validate Companion release candidate
@@ -111,6 +168,10 @@ jobs:
           pwsh
           -File Tools/Test-NinjaCrawlerReleasePackaging.ps1
 
+      - name: Test CI input fingerprints
+        shell: pwsh
+        run: pwsh -File Tools/Test-CIInputFingerprint.ps1
+
       - name: Test release automation configuration
         shell: pwsh
         run: >
@@ -126,9 +187,33 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
+  quality_check:
+    name: Frontend quality
+    if: ${{ github.event.action != 'closed' && always() }}
+    needs: [changes, quality_execution]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Report frontend validation decision
+        shell: bash
+        env:
+          QUALITY_REUSED: ${{ needs.changes.outputs.quality_reuse }}
+          QUALITY_REASON: ${{ needs.changes.outputs.quality_reason }}
+          QUALITY_RESULT: ${{ needs.quality_execution.result }}
+        run: |
+          set -euo pipefail
+          echo "Frontend quality reused: $QUALITY_REUSED"
+          echo "Reason: $QUALITY_REASON"
+          echo "Execution result: $QUALITY_RESULT"
+          if [ "$QUALITY_REUSED" != "true" ] && [ "$QUALITY_RESULT" != "success" ]; then
+            echo "Frontend quality was neither reused nor completed successfully." >&2
+            exit 1
+          fi
+
   windows-build:
     name: Windows cross-build execution
-    needs: [changes, quality]
+    needs: [changes, quality_check]
     if: ${{ needs.changes.outputs.windows == 'true' }}
     runs-on: ${{ fromJSON((github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)) && '["self-hosted","proxmox-lxc","crossbuild","mode-ephemeral"]' || '["ubuntu-latest"]') }}
     timeout-minutes: 45
@@ -249,7 +334,7 @@ jobs:
 
   windows-check:
     name: Windows cross-build
-    if: ${{ always() }}
+    if: ${{ github.event.action != 'closed' && always() }}
     needs: [changes, windows-build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
