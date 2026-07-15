@@ -855,11 +855,12 @@ fn create_profile_editor_window(
         tauri::WebviewUrl::App(profile_editor_entrypoint(intent.as_ref()).into()),
     )
     .title("Profile editor")
-    .inner_size(960.0, 900.0)
-    .min_inner_size(960.0, 900.0)
+    .inner_size(960.0, 820.0)
+    .min_inner_size(960.0, 680.0)
     .max_inner_size(960.0, 4096.0)
     .resizable(true)
-    .maximizable(false)
+    .maximizable(true)
+    .decorations(false)
     .closable(true)
     .visible(false)
     .build()
@@ -870,28 +871,25 @@ fn create_profile_editor_window(
         &window,
         WindowSizeSpec {
             width: 960,
-            height: 900,
+            height: 820,
         },
         apply_profile_editor_window_constraints,
     )
 }
 
 fn apply_profile_editor_window_constraints(window: &tauri::WebviewWindow) -> Result<(), String> {
-    if window.is_maximized().map_err(|error| error.to_string())? {
-        window.unmaximize().map_err(|error| error.to_string())?;
-    }
     let scale_factor = window.scale_factor().map_err(|error| error.to_string())?;
-    let current_height = window
+    let current = window
         .inner_size()
         .map_err(|error| error.to_string())?
-        .to_logical::<f64>(scale_factor)
-        .height
-        .max(900.0);
+        .to_logical::<f64>(scale_factor);
+    let current_height = current.height.max(680.0);
+    let current_width = current.width.max(960.0).min(960.0);
     window
-        .set_size(tauri::LogicalSize::new(960.0, current_height))
+        .set_size(tauri::LogicalSize::new(current_width, current_height))
         .map_err(|error| error.to_string())?;
     window
-        .set_min_size(Some(tauri::LogicalSize::new(960.0, 900.0)))
+        .set_min_size(Some(tauri::LogicalSize::new(960.0, 680.0)))
         .map_err(|error| error.to_string())?;
     window
         .set_max_size(Some(tauri::LogicalSize::new(960.0, 4096.0)))
@@ -900,7 +898,7 @@ fn apply_profile_editor_window_constraints(window: &tauri::WebviewWindow) -> Res
         .set_resizable(true)
         .map_err(|error| error.to_string())?;
     window
-        .set_maximizable(false)
+        .set_maximizable(true)
         .map_err(|error| error.to_string())?;
     Ok(())
 }
