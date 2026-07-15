@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.18.2...v0.19.0) (2026-07-15)
+
+
+### Features
+
+* **workspace:** establish brand visual system and custom window shell ([#193](https://github.com/MetalDevOps/NinjaCrawler/issues/193)) ([1d91f7f](https://github.com/MetalDevOps/NinjaCrawler/commit/1d91f7feaea5090a1d22779f5b75a7eb85a8723a))
+
 ## [0.18.2](https://github.com/MetalDevOps/NinjaCrawler/compare/v0.18.1...v0.18.2) (2026-07-14)
 
 
