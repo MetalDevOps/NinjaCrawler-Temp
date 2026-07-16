@@ -410,10 +410,31 @@ foreach ($requiredFragment in @(
     'path: .release-source/release/*',
     'publish:',
     'runs-on: ubuntu-latest',
-    'contents: write'
+    'contents: write',
+    'companion_version=',
+    'NinjaCrawler-Companion-$COMPANION_VERSION.zip',
+    'companionVersion = $env:COMPANION_VERSION',
+    'schemaVersion = 2',
+    'Annotate changelog with bundled Companion',
+    '-CompanionVersion $env:COMPANION_VERSION'
 )) {
     if (-not $appReleaseWorkflow.Contains($requiredFragment)) {
         throw "App release workflow is missing the split self-hosted build/hosted publish contract: $requiredFragment"
+    }
+}
+
+if ($appReleaseWorkflow.Contains('-SkipCompanion')) {
+    throw "App release packaging must co-ship the Companion ZIP (do not pass -SkipCompanion)."
+}
+
+foreach ($requiredFragment in @(
+    'Update README Companion download links',
+    'id: publish_release',
+    '-CompanionVersion $env:COMPANION_VERSION',
+    'steps.publish_release.outcome == ''success'''
+)) {
+    if (-not $companionReleaseWorkflow.Contains($requiredFragment)) {
+        throw "Companion release workflow is missing README maintenance: $requiredFragment"
     }
 }
 

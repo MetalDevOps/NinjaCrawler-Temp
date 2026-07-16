@@ -75,6 +75,7 @@ jobs:
           -CompanionOnly
 
       - name: Publish GitHub Release
+        id: publish_release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -120,8 +121,95 @@ jobs:
             throw "Companion GitHub Release publication failed."
           }
 
+      - name: Update README Companion download links
+        if: ${{ steps.publish_release.outcome == 'success' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          COMPANION_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $branch = "automation/readme-companion-$env:RELEASE_TAG"
+          git fetch origin main
+          git switch --force-create $branch origin/main
+
+          & Tools/Update-NinjaCrawlerReleaseReadme.ps1 -CompanionVersion $env:COMPANION_VERSION
+
+          if (-not (git status --short -- README.md)) {
+            Write-Host "README already points to Companion $env:COMPANION_VERSION."
+            exit 0
+          }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs(readme): update Companion download links for $env:RELEASE_TAG"
+
+          git config --local --unset-all http.https://github.com/.extraheader
+          gh auth setup-git
+          git push --force --set-upstream origin $branch
+
+          $pr = gh pr list --repo ${{ github.repository }} --base main --head $branch `
+            --state open --json number --jq '.[0].number'
+          if (-not $pr) {
+            gh pr create --repo ${{ github.repository }} --base main --head $branch `
+              --title "docs(readme): update Companion download links for $env:RELEASE_TAG" `
+              --body "Updates the README Companion download links after $env:RELEASE_TAG was published."
+            if ($LASTEXITCODE -ne 0) {
+              throw "Companion README update PR creation failed."
+            }
+            $pr = gh pr list --repo ${{ github.repository }} --base main --head $branch `
+              --state open --json number --jq '.[0].number'
+          }
+
+          if (-not $pr) {
+            throw "Could not resolve the Companion README update PR number."
+          }
+
+          $deadline = (Get-Date).AddMinutes(20)
+          do {
+            $checkData = gh pr view $pr --repo ${{ github.repository }} --json statusCheckRollup |
+              ConvertFrom-Json
+            $checks = @($checkData.statusCheckRollup)
+            $failed = @(
+              $checks | Where-Object {
+                $_.status -eq 'COMPLETED' -and
+                $_.conclusion -notin @('SUCCESS', 'SKIPPED', 'NEUTRAL')
+              }
+            )
+            if ($failed.Count -gt 0) {
+              $names = $failed | ForEach-Object name
+              throw "Companion README update PR checks failed: $($names -join ', ')."
+            }
+
+            $pending = @($checks | Where-Object { $_.status -ne 'COMPLETED' })
+            if ($checks.Count -gt 0 -and $pending.Count -eq 0) {
+              break
+            }
+            if ((Get-Date) -ge $deadline) {
+              throw "Timed out waiting for Companion README update PR checks."
+            }
+
+            Write-Host "Waiting for Companion README update PR checks..."
+            Start-Sleep -Seconds 10
+          } while ($true)
+
+          $requiredChecks = @('Frontend quality', 'Windows cross-build')
+          $completedNames = @($checks | ForEach-Object name)
+          $missingChecks = @($requiredChecks | Where-Object { $_ -notin $completedNames })
+          if ($missingChecks.Count -gt 0) {
+            throw "Companion README update PR is missing required checks: $($missingChecks -join ', ')."
+          }
+
+          gh pr merge $pr --repo ${{ github.repository }} --squash --delete-branch `
+            --subject "docs(readme): update Companion download links for $env:RELEASE_TAG" `
+            --body "[skip ci]"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Companion README update PR merge failed."
+          }
+
       - name: Reconcile recovered Companion release PR label
-        if: ${{ inputs.sha != '' }}
+        if: ${{ always() && inputs.sha != '' && steps.publish_release.outcome == 'success' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -139,7 +227,7 @@ jobs:
           }
 
       - name: Re-anchor Companion release-please
-        if: success()
+        if: ${{ always() && steps.publish_release.outcome == 'success' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -160,7 +248,7 @@ jobs:
           gh workflow run release-please.yml --repo ${{ github.repository }} --ref main
 
       - name: Back-sync published Companion version to develop
-        if: success()
+        if: ${{ always() && steps.publish_release.outcome == 'success' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}

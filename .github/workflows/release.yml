@@ -38,6 +38,7 @@ jobs:
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
+      companion_version: ${{ steps.version.outputs.companion_version }}
       sha: ${{ steps.version.outputs.sha }}
       artifact: ${{ steps.artifact.outputs.name }}
       artifact_run_id: ${{ steps.artifact.outputs.run_id }}
@@ -96,8 +97,14 @@ jobs:
             }
           }
 
+          $companionVersion = (Get-Content NinjaCrawler.Companion/manifest.json -Raw | ConvertFrom-Json).version
+          if ($companionVersion -notmatch '^\d+\.\d+\.\d+$') {
+            throw "NinjaCrawler.Companion/manifest.json has invalid version '$companionVersion'."
+          }
+
           "tag=$env:RELEASE_TAG" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
+          "companion_version=$companionVersion" >> $env:GITHUB_OUTPUT
           "sha=$((git rev-parse HEAD).Trim())" >> $env:GITHUB_OUTPUT
 
       - name: Resolve reusable build artifact
@@ -107,6 +114,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
+          COMPANION_VERSION: ${{ steps.version.outputs.companion_version }}
           RELEASE_SHA: ${{ steps.version.outputs.sha }}
           REQUESTED_RUN_ID: ${{ inputs.artifact_run_id }}
         run: |
@@ -150,8 +158,13 @@ jobs:
             fi
             gh run download "$run_id" --repo "${{ github.repository }}" \
               --name "$name" --dir "$candidate" || valid=false
-            jq -e --arg version "$VERSION" --arg sha "$RELEASE_SHA" --arg tooling "$tooling_sha" \
-              '.schemaVersion == 1 and .version == $version and .releaseSha == $sha and .toolingSha == $tooling' \
+            jq -e --arg version "$VERSION" --arg companion "$COMPANION_VERSION" \
+              --arg sha "$RELEASE_SHA" --arg tooling "$tooling_sha" \
+              '.schemaVersion == 2
+               and .version == $version
+               and .companionVersion == $companion
+               and .releaseSha == $sha
+               and .toolingSha == $tooling' \
               "$candidate/BUILD-PROVENANCE.json" >/dev/null || valid=false
             (cd "$candidate" && sha256sum --check SHA256SUMS.txt) || valid=false
 
@@ -160,6 +173,7 @@ jobs:
               CHANGELOG.md \
               "NinjaCrawler-$VERSION-windows-x64-portable.exe" \
               "NinjaCrawler-$VERSION-windows-x64-setup.exe" \
+              "NinjaCrawler-Companion-$COMPANION_VERSION.zip" \
               SHA256SUMS.txt | sort)"
             actual="$(find "$candidate" -maxdepth 1 -type f -printf '%f\n' | sort)"
             if [ "$actual" != "$expected" ]; then
@@ -312,6 +326,26 @@ jobs:
             -Repository "${{ github.repository }}" `
             -OutputPath "artifacts/CHANGELOG.md"
 
+      - name: Annotate changelog with bundled Companion
+        shell: pwsh
+        env:
+          COMPANION_VERSION: ${{ needs.prepare.outputs.companion_version }}
+        run: |
+          $changelogPath = 'artifacts/CHANGELOG.md'
+          $companionAsset = "NinjaCrawler-Companion-$env:COMPANION_VERSION.zip"
+          $note = @(
+            ''
+            "This desktop release includes **NinjaCrawler Companion $env:COMPANION_VERSION** ($companionAsset)."
+            'Companion-only updates continue to ship under independent companion-vX.Y.Z tags.'
+            ''
+          ) -join "`n"
+          $existing = if (Test-Path -LiteralPath $changelogPath) {
+            Get-Content -LiteralPath $changelogPath -Raw
+          } else {
+            ''
+          }
+          Set-Content -LiteralPath $changelogPath -Value ($existing.TrimEnd() + "`n" + $note) -NoNewline
+
       - name: Package release assets
         shell: pwsh
         run: >
@@ -319,18 +353,19 @@ jobs:
           -Version ${{ needs.prepare.outputs.version }}
           -TargetTriple x86_64-pc-windows-msvc
           -ChangelogPath artifacts/CHANGELOG.md
-          -SkipCompanion
 
       - name: Record build provenance
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          COMPANION_VERSION: ${{ needs.prepare.outputs.companion_version }}
           RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
           TOOLING_SHA: ${{ github.sha }}
         run: |
           [ordered]@{
-            schemaVersion = 1
+            schemaVersion = 2
             version = $env:RELEASE_VERSION
+            companionVersion = $env:COMPANION_VERSION
             releaseSha = $env:RELEASE_SHA
             toolingSha = $env:TOOLING_SHA
           } | ConvertTo-Json | Set-Content release/BUILD-PROVENANCE.json -NoNewline
@@ -379,6 +414,7 @@ jobs:
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          COMPANION_VERSION: ${{ needs.prepare.outputs.companion_version }}
           RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           $provenancePath = 'release/BUILD-PROVENANCE.json'
@@ -386,8 +422,9 @@ jobs:
             throw 'The downloaded build artifact has no provenance record.'
           }
           $provenance = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json
-          if ($provenance.schemaVersion -ne 1 -or
+          if ($provenance.schemaVersion -ne 2 -or
               $provenance.version -ne $env:RELEASE_VERSION -or
+              $provenance.companionVersion -ne $env:COMPANION_VERSION -or
               $provenance.releaseSha -ne $env:RELEASE_SHA -or
               $provenance.toolingSha -notmatch '^[0-9a-f]{40}$') {
             throw 'The downloaded build artifact does not match the requested release identity.'
@@ -460,15 +497,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          COMPANION_VERSION: ${{ needs.prepare.outputs.companion_version }}
         run: |
           $branch = "automation/readme-release-$env:RELEASE_TAG"
           git fetch origin main
           git switch --force-create $branch origin/main
 
-          & Tools/Update-NinjaCrawlerReleaseReadme.ps1 -Version $env:RELEASE_VERSION
+          & Tools/Update-NinjaCrawlerReleaseReadme.ps1 `
+            -Version $env:RELEASE_VERSION `
+            -CompanionVersion $env:COMPANION_VERSION
 
           if (-not (git status --short -- README.md)) {
-            Write-Host "README already points to $env:RELEASE_TAG."
+            Write-Host "README already points to $env:RELEASE_TAG (Companion $env:COMPANION_VERSION)."
             exit 0
           }
 
