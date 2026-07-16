@@ -138,6 +138,7 @@ describe('BatchEditorWindowPage', () => {
     const snapshot = createSnapshot()
     bridgeMocks.loadWorkspaceSnapshot.mockResolvedValue(snapshot)
     bridgeMocks.batchUpdateSourceProfiles.mockRejectedValue(new Error('boom'))
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
     const view = render(<BatchEditorWindowPage initialSourceIds={['source-1']} />)
 
@@ -151,6 +152,8 @@ describe('BatchEditorWindowPage', () => {
       expect(screen.getByText('Failed to apply changes: boom')).toBeTruthy()
     })
     expect(closeWindowMock).not.toHaveBeenCalled()
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
   })
 
   it('renders the shared Twitter option schema and applies only a Twitter patch', async () => {
