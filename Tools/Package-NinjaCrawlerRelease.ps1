@@ -82,57 +82,63 @@ if (-not $CompanionOnly) {
     }
 }
 
-# The Companion ships in its own release; -SkipCompanion lets the app release
-# build only the app assets without packaging the extension ZIP.
+# App releases co-ship the Companion ZIP from the tree. Companion-only releases
+# use -CompanionOnly. -SkipCompanion remains available for local app-only packaging.
 if (-not $SkipCompanion) {
-if (-not (Test-Path -LiteralPath $companionManifestPath -PathType Leaf)) {
-    throw "Companion manifest not found: '$companionManifestPath'."
-}
-
-try {
-    $companionManifest = Get-Content -LiteralPath $companionManifestPath -Raw | ConvertFrom-Json
-} catch {
-    throw "Companion manifest is not valid JSON: $($_.Exception.Message)"
-}
-
-$companionVersion = [string]$companionManifest.version
-if ($companionVersion -notmatch '^\d+\.\d+\.\d+$') {
-    throw "Companion manifest version '$companionVersion' must use the X.Y.Z format."
-}
-
-$companionRequiredFiles = @("manifest.json", "popup.html", "README.md")
-foreach ($relativePath in $companionRequiredFiles) {
-    $requiredPath = Join-Path $companionSourcePath $relativePath
-    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
-        throw "Required Companion file not found: '$requiredPath'."
+    if (-not (Test-Path -LiteralPath $companionManifestPath -PathType Leaf)) {
+        throw "Companion manifest not found: '$companionManifestPath'."
     }
-}
 
-$companionSourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $companionSourcePath "src") -File -Recurse |
-    Where-Object { $_.Name -notlike "*.test.js" })
-if ($companionSourceFiles.Count -eq 0) {
-    throw "No Companion runtime files were found."
-}
+    try {
+        $companionManifest = Get-Content -LiteralPath $companionManifestPath -Raw | ConvertFrom-Json
+    } catch {
+        throw "Companion manifest is not valid JSON: $($_.Exception.Message)"
+    }
 
-$companionName = "NinjaCrawler-Companion-$companionVersion"
-$companionArchiveRoot = "NinjaCrawler-Companion"
-$companionStagingPath = Join-Path $outputPath $companionArchiveRoot
-New-Item -ItemType Directory -Path $companionStagingPath -Force | Out-Null
+    $companionVersion = [string]$companionManifest.version
+    if ($companionVersion -notmatch '^\d+\.\d+\.\d+$') {
+        throw "Companion manifest version '$companionVersion' must use the X.Y.Z format."
+    }
 
-foreach ($relativePath in $companionRequiredFiles) {
-    Copy-Item -LiteralPath (Join-Path $companionSourcePath $relativePath) -Destination $companionStagingPath
-}
-foreach ($sourceFile in $companionSourceFiles) {
-    $relativePath = $sourceFile.FullName.Substring($companionSourcePath.Length).TrimStart('\', '/')
-    $destinationPath = Join-Path $companionStagingPath $relativePath
-    New-Item -ItemType Directory -Path (Split-Path -Parent $destinationPath) -Force | Out-Null
-    Copy-Item -LiteralPath $sourceFile.FullName -Destination $destinationPath
-}
+    $companionRequiredFiles = @("manifest.json", "popup.html", "README.md")
+    foreach ($relativePath in $companionRequiredFiles) {
+        $requiredPath = Join-Path $companionSourcePath $relativePath
+        if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+            throw "Required Companion file not found: '$requiredPath'."
+        }
+    }
 
-$companionZip = Join-Path $outputPath "$companionName.zip"
-Compress-Archive -LiteralPath $companionStagingPath -DestinationPath $companionZip -CompressionLevel Optimal
-Remove-Item -LiteralPath $companionStagingPath -Recurse -Force
-$assets += $companionZip
+    # Include icons and other non-test runtime files under the Companion tree.
+    $companionSourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $companionSourcePath "src") -File -Recurse |
+        Where-Object { $_.Name -notlike "*.test.js" })
+    if ($companionSourceFiles.Count -eq 0) {
+        throw "No Companion runtime files were found."
+    }
+
+    $companionName = "NinjaCrawler-Companion-$companionVersion"
+    $companionArchiveRoot = "NinjaCrawler-Companion"
+    $companionStagingPath = Join-Path $outputPath $companionArchiveRoot
+    New-Item -ItemType Directory -Path $companionStagingPath -Force | Out-Null
+
+    foreach ($relativePath in $companionRequiredFiles) {
+        Copy-Item -LiteralPath (Join-Path $companionSourcePath $relativePath) -Destination $companionStagingPath
+    }
+    foreach ($sourceFile in $companionSourceFiles) {
+        $relativePath = $sourceFile.FullName.Substring($companionSourcePath.Length).TrimStart('\', '/')
+        $destinationPath = Join-Path $companionStagingPath $relativePath
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destinationPath) -Force | Out-Null
+        Copy-Item -LiteralPath $sourceFile.FullName -Destination $destinationPath
+    }
+
+    $iconsPath = Join-Path $companionSourcePath "icons"
+    if (Test-Path -LiteralPath $iconsPath -PathType Container) {
+        Copy-Item -LiteralPath $iconsPath -Destination (Join-Path $companionStagingPath "icons") -Recurse
+    }
+
+    $companionZip = Join-Path $outputPath "$companionName.zip"
+    Compress-Archive -LiteralPath $companionStagingPath -DestinationPath $companionZip -CompressionLevel Optimal
+    Remove-Item -LiteralPath $companionStagingPath -Recurse -Force
+    $assets += $companionZip
 }
 
 if ($assets.Count -eq 0) {

@@ -410,10 +410,31 @@ foreach ($requiredFragment in @(
     'path: .release-source/release/*',
     'publish:',
     'runs-on: ubuntu-latest',
-    'contents: write'
+    'contents: write',
+    'companion_version=',
+    'NinjaCrawler-Companion-$COMPANION_VERSION.zip',
+    'companionVersion = $env:COMPANION_VERSION',
+    'schemaVersion = 2',
+    'Annotate changelog with bundled Companion',
+    '-CompanionVersion $env:COMPANION_VERSION'
 )) {
     if (-not $appReleaseWorkflow.Contains($requiredFragment)) {
         throw "App release workflow is missing the split self-hosted build/hosted publish contract: $requiredFragment"
+    }
+}
+
+if ($appReleaseWorkflow.Contains('-SkipCompanion')) {
+    throw "App release packaging must co-ship the Companion ZIP (do not pass -SkipCompanion)."
+}
+
+foreach ($requiredFragment in @(
+    'Update README Companion download links',
+    'id: publish_release',
+    '-CompanionVersion $env:COMPANION_VERSION',
+    'steps.publish_release.outcome == ''success'''
+)) {
+    if (-not $companionReleaseWorkflow.Contains($requiredFragment)) {
+        throw "Companion release workflow is missing README maintenance: $requiredFragment"
     }
 }
 
@@ -440,6 +461,25 @@ if (-not $companionReleaseWorkflow.Contains('gh workflow run release-back-sync.y
     -not $companionReleaseWorkflow.Contains('-f tag=${{ steps.version.outputs.tag }}')) {
     throw "The Companion release must back-sync its published tag."
 }
+
+if ($appReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }} --squash')) {
+    throw "App README automation must merge into main with --merge (main ruleset is merge-only)."
+}
+if (-not $appReleaseWorkflow.Contains('gh pr merge $pr --repo ${{ github.repository }} --merge')) {
+    throw "App README automation must use gh pr merge --merge."
+}
+
+foreach ($requiredFragment in @(
+    'Do not squash',
+    'promote',
+    'merge commit'
+)) {
+    if (-not $promotionWorkflow.Contains($requiredFragment)) {
+        throw "Promotion PR body is missing merge-method guidance: $requiredFragment"
+    }
+}
+
+& (Join-Path $PSScriptRoot 'Test-PRMergePolicy.ps1')
 
 foreach ($requiredFragment in @(
     '^(companion-)?v[0-9]+\.[0-9]+\.[0-9]+$',
