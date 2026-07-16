@@ -770,18 +770,6 @@ export async function loadHealth() {
   return response.json()
 }
 
-/** Ask NinjaCrawler to download the available Companion ZIP into AppData. */
-export async function stageCompanionUpdate() {
-  const companionVersion = globalThis.chrome?.runtime?.getManifest?.()?.version ?? ''
-  const response = await fetch(`${API_BASE}/update/stage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ companionVersion }),
-  })
-  if (!response.ok) throw new Error(await readError(response))
-  return response.json()
-}
-
 export async function loadCompanionUpdateStatus() {
   const companionVersion = globalThis.chrome?.runtime?.getManifest?.()?.version ?? ''
   const response = await fetch(
