@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/JustShinobi/NinjaCrawler/compare/companion-v0.16.0...companion-v0.17.0) (2026-07-16)
+
+
+### Features
+
+* **companion:** stage updates in AppData and detect first Instagram story ([#22](https://github.com/JustShinobi/NinjaCrawler/issues/22)) ([ad7577c](https://github.com/JustShinobi/NinjaCrawler/commit/ad7577c4a311a608fdebc182d87f83bcfa8314d9))
+
 ## [0.16.0](https://github.com/MetalDevOps/NinjaCrawler/compare/companion-v0.15.1...companion-v0.16.0) (2026-07-15)
 
 
