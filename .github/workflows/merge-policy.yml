@@ -59,14 +59,24 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
+          # Do not trust $LASTEXITCODE after a PowerShell script: a successful
+          # .ps1 that never calls exit leaves the previous native exit code.
           $policyJson = & Tools/Get-PRMergePolicy.ps1 `
             -Base $env:PR_BASE `
             -Head $env:PR_HEAD `
             -Title $env:PR_TITLE
-          if ($LASTEXITCODE -ne 0) {
-            throw "Get-PRMergePolicy.ps1 failed."
+          if ($null -eq $policyJson -or [string]::IsNullOrWhiteSpace([string]$policyJson)) {
+            throw "Get-PRMergePolicy.ps1 returned no policy JSON."
           }
-          $policy = $policyJson | ConvertFrom-Json
+          try {
+            $policy = $policyJson | ConvertFrom-Json
+          } catch {
+            throw "Get-PRMergePolicy.ps1 returned invalid JSON: $policyJson"
+          }
+          if ([string]::IsNullOrWhiteSpace([string]$policy.method) -or
+              [string]::IsNullOrWhiteSpace([string]$policy.label)) {
+            throw "Get-PRMergePolicy.ps1 returned an incomplete policy: $policyJson"
+          }
           $critical = ([bool]$policy.critical).ToString().ToLowerInvariant()
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "method=$($policy.method)"
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "label=$($policy.label)"
