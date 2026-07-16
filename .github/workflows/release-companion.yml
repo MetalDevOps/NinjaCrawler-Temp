@@ -11,6 +11,8 @@ name: Release Companion
 # in the config), so the git tag does not exist yet; this workflow packages the
 # static extension ZIP, attaches it, and only then publishes — which finally
 # creates the tag. Mirrors the draft->attach->publish dance in release.yml.
+# Companion releases deliberately use make_latest=false so they remain available
+# in the release list without replacing the desktop app as the repository Latest.
 
 on:
   workflow_dispatch:
@@ -79,6 +81,7 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
           RELEASE_SHA: ${{ inputs.sha || github.sha }}
@@ -98,11 +101,20 @@ jobs:
               throw "Companion release asset upload failed."
             }
 
+            $releaseId = & gh api "repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG" --jq '.id'
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($releaseId)) {
+              throw "Could not resolve Companion release id for $env:RELEASE_TAG."
+            }
+
+            # gh release edit cannot explicitly opt out of Latest. Publish through
+            # the Releases API so draft=false and make_latest=false are atomic.
             $publishArgs = @(
-              'release', 'edit', $env:RELEASE_TAG
-              '--title', "NinjaCrawler Companion $env:RELEASE_VERSION"
-              '--draft=false'
-              '--prerelease=false'
+              'api', '--method', 'PATCH'
+              "repos/$env:GH_REPO/releases/$releaseId"
+              '--field', "name=NinjaCrawler Companion $env:RELEASE_VERSION"
+              '--field', 'draft=false'
+              '--field', 'prerelease=false'
+              '--field', 'make_latest=false'
             )
             & gh @publishArgs
           } else {
@@ -113,6 +125,7 @@ jobs:
               '--target', $env:RELEASE_SHA
               '--title', "NinjaCrawler Companion $env:RELEASE_VERSION"
               '--notes', "NinjaCrawler Companion $env:RELEASE_VERSION"
+              '--latest=false'
             )
             $arguments += $assets
             & gh @arguments

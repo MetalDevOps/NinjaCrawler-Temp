@@ -441,6 +441,21 @@ foreach ($requiredFragment in @(
 }
 
 foreach ($requiredFragment in @(
+    'repos/$env:GH_REPO/releases/tags/$env:RELEASE_TAG',
+    'repos/$env:GH_REPO/releases/$releaseId',
+    "'--field', 'make_latest=false'",
+    "'--latest=false'"
+)) {
+    if (-not $companionReleaseWorkflow.Contains($requiredFragment)) {
+        throw "Companion release workflow can replace the desktop app as Latest: $requiredFragment"
+    }
+}
+
+if ($companionReleaseWorkflow.Contains("'release', 'edit'")) {
+    throw 'Companion draft publication must use the Releases API so make_latest=false is applied atomically.'
+}
+
+foreach ($requiredFragment in @(
     "EVENT_PR_NUMBER: `${{ github.event.pull_request.number || '' }}",
     'if [ "$EVENT_NAME" = "pull_request" ]; then',
     'pr="$EVENT_PR_NUMBER"',
