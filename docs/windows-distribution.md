@@ -72,8 +72,13 @@ Bundled installers:
 
 - `bundle\nsis\*-setup.exe`
 
-GitHub releases also contain `NinjaCrawler-Companion-<version>.zip`. The
-Companion version is read independently from `NinjaCrawler.Companion/manifest.json`.
+Each desktop GitHub release (`vX.Y.Z`) also contains
+`NinjaCrawler-Companion-<companionVersion>.zip`. The Companion version is read
+independently from `NinjaCrawler.Companion/manifest.json` at packaging time and
+is not forced to match the desktop version. Companion-only releases under
+`companion-vX.Y.Z` continue to publish the same ZIP shape for extension-only
+updates.
+
 Extract the archive, open the browser extension management page, enable developer
 mode, and choose **Load unpacked** using the extracted folder.
 
@@ -83,7 +88,8 @@ Remove a pre-0.3.0 installation once. Future updates can be extracted over the
 same folder and applied with **Reload** on the browser extension management page.
 
 The Companion archive contains only runtime files and installation documentation.
-Its SHA-256 hash is included in the release `SHA256SUMS.txt`.
+When co-shipped with the desktop app, its SHA-256 hash is included in that
+release’s `SHA256SUMS.txt`.
 
 ## Publish Commands
 
