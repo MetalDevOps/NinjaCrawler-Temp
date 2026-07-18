@@ -10,6 +10,7 @@ pub mod import_runtime;
 pub mod instagram_connector;
 pub mod media_path_migration_runtime;
 pub mod media_thumbnail_runtime;
+pub mod notification_runtime;
 pub mod runtime_log;
 pub mod scheduler_runtime;
 pub mod session_secret_store;

@@ -10,6 +10,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(infrastructure::desktop_runtime::window_state_plugin())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             infrastructure::desktop_runtime::setup(app.handle())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;

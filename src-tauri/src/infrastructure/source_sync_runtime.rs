@@ -12,8 +12,8 @@ use crate::domain::models::{
 };
 use crate::infrastructure::runtime_log::RuntimeLogAnchor;
 use crate::infrastructure::{
-    desktop_runtime, media_path_migration_runtime, media_thumbnail_runtime, runtime_log,
-    workspace_repository,
+    desktop_runtime, media_path_migration_runtime, media_thumbnail_runtime, notification_runtime,
+    runtime_log, workspace_repository,
 };
 use crate::providers;
 
@@ -448,6 +448,16 @@ pub fn restore_persisted_queue(app: &AppHandle) {
     }
 }
 
+fn active_downloaded_items(provider: &str, job_key: &str) -> Option<u32> {
+    queue_state().lock().ok().and_then(|state| {
+        state
+            .active_jobs
+            .get(provider)
+            .filter(|active| active.job_key == job_key)
+            .and_then(|active| active.downloaded_items)
+    })
+}
+
 fn provider_has_pending_jobs(provider: &str) -> bool {
     queue_state()
         .lock()
@@ -481,7 +491,13 @@ fn apply_media_migration_hold(job: &mut SourceSyncQueueJob, is_migrating: bool) 
 }
 
 fn spawn_worker(app: AppHandle, provider: String) {
-    thread::spawn(move || loop {
+    thread::spawn(move || {
+        // Accumulates the results of jobs from this worker until the provider queue
+        // drains, then emitting a single aggregated native notification (one
+        // per batch, never one per item). Jobs returning to account or
+        // migration hold don't enter the batch — only those that actually finish.
+        let mut batch = notification_runtime::SyncBatch::new(provider.clone());
+        loop {
         let job = match dequeue_next(&provider) {
             Ok(DequeueOutcome::Job(job)) => job,
             Ok(DequeueOutcome::WaitingForAccount) => {
@@ -496,11 +512,13 @@ fn spawn_worker(app: AppHandle, provider: String) {
             }
             Ok(DequeueOutcome::Finished) => {
                 publish_queue_status_event(&app);
+                notification_runtime::notify_sync_batch(&app, &batch);
                 break;
             }
             Err(error) => {
                 eprintln!("manual source-sync worker failed to dequeue: {error}");
                 publish_queue_status_event(&app);
+                notification_runtime::notify_sync_batch(&app, &batch);
                 break;
             }
         };
@@ -535,7 +553,18 @@ fn spawn_worker(app: AppHandle, provider: String) {
             continue;
         }
         let (final_status, final_summary) = summarize_sync_result(&job.source_id, &sync_result);
+        // Reads the downloaded total reported in the active job before finish_active
+        // removes it from the queue state.
+        let downloaded_items = active_downloaded_items(&job.provider, &job.job_key)
+            .or(job.downloaded_items)
+            .unwrap_or(0);
         finish_active(&job, &final_status, &final_summary);
+        batch.push(notification_runtime::SyncBatchItem {
+            handle: job.handle.clone(),
+            status: final_status.clone(),
+            downloaded_items,
+            summary: final_summary.clone(),
+        });
         publish_queue_status_event(&app);
 
         // Throttle configurável entre downloads. Cada conta/cookie tem seu
@@ -589,6 +618,7 @@ fn spawn_worker(app: AppHandle, provider: String) {
                     emit_runtime_refresh(&app, &snapshot);
                 }
             }
+        }
         }
     });
 }
