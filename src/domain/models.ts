@@ -1167,3 +1167,12 @@ export interface AppUpdateStatus {
   publishedAt?: string
   updateAvailable: boolean
 }
+
+export type AppUpdatePhase = 'downloading' | 'installing' | 'done'
+
+export interface AppUpdateProgress {
+  phase: AppUpdatePhase
+  downloaded: number
+  total?: number
+  percent?: number
+}

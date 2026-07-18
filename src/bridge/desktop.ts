@@ -16,6 +16,7 @@ import type {
   AppSetting,
   AppSettingUpsert,
   AppBuildInfo,
+  AppUpdateProgress,
   AppUpdateStatus,
   MigrationStatus,
   MigrationProgress,
@@ -2134,6 +2135,35 @@ export async function checkAppUpdate(): Promise<AppUpdateStatus> {
   return normalizeAppUpdateStatus(await invoke<unknown>('check_app_update'))
 }
 
+const APP_UPDATE_PROGRESS_EVENT_NAME = 'runtime://app-update-progress'
+
+function normalizeAppUpdateProgress(raw: unknown): AppUpdateProgress {
+  const value = isRecord(raw) ? raw : {}
+  const phase = enumValue(
+    pick(value, 'phase'),
+    ['downloading', 'installing', 'done'] as const,
+    'downloading',
+  )
+  return {
+    phase,
+    downloaded: numberValue(value, ['downloaded'], 0),
+    total: optionalNumberValue(value, ['total']),
+    percent: optionalNumberValue(value, ['percent']),
+  }
+}
+
+export async function installAppUpdate(): Promise<void> {
+  await invoke('install_app_update')
+}
+
+export function onAppUpdateProgress(
+  handler: (progress: AppUpdateProgress) => void,
+): Promise<() => void> {
+  return listen(APP_UPDATE_PROGRESS_EVENT_NAME, (event) => {
+    handler(normalizeAppUpdateProgress(event.payload))
+  })
+}
+
 export async function loadSystemShortDatePattern(): Promise<string> {
   const result = await invoke<unknown>('system_short_date_pattern')
   return typeof result === 'string' && result.trim().length > 0
@@ -3524,4 +3554,71 @@ export async function upsertAppSetting(draft: AppSettingUpsert): Promise<Workspa
     'upsert_app_setting',
     buildInvokeArgs(payload),
   )
+}
+
+export interface BackupExportResult {
+  cancelled: boolean
+  path: string | null
+  includesSecrets: boolean
+}
+
+export interface BackupInspection {
+  cancelled: boolean
+  path: string | null
+  includesSecrets: boolean
+  appVersion: string | null
+  createdAt: string | null
+}
+
+export interface BackupImportResult {
+  includesSecrets: boolean
+  secretsRestored: number
+  restartRequired: boolean
+  preRestorePath: string | null
+}
+
+export async function exportWorkspaceBackup(
+  includeSecrets: boolean,
+  password?: string,
+): Promise<BackupExportResult> {
+  const result = await invoke<unknown>('export_workspace_backup', {
+    includeSecrets,
+    include_secrets: includeSecrets,
+    password: password ?? null,
+  })
+  const record = isRecord(result) ? result : {}
+  return {
+    cancelled: booleanValue(record, ['cancelled']),
+    path: optionalStringValue(record, ['path']) ?? null,
+    includesSecrets: booleanValue(record, ['includesSecrets', 'includes_secrets']),
+  }
+}
+
+export async function inspectWorkspaceBackup(): Promise<BackupInspection> {
+  const result = await invoke<unknown>('inspect_workspace_backup')
+  const record = isRecord(result) ? result : {}
+  return {
+    cancelled: booleanValue(record, ['cancelled']),
+    path: optionalStringValue(record, ['path']) ?? null,
+    includesSecrets: booleanValue(record, ['includesSecrets', 'includes_secrets']),
+    appVersion: optionalStringValue(record, ['appVersion', 'app_version']) ?? null,
+    createdAt: optionalStringValue(record, ['createdAt', 'created_at']) ?? null,
+  }
+}
+
+export async function importWorkspaceBackup(
+  path: string,
+  password?: string,
+): Promise<BackupImportResult> {
+  const result = await invoke<unknown>('import_workspace_backup', {
+    path,
+    password: password ?? null,
+  })
+  const record = isRecord(result) ? result : {}
+  return {
+    includesSecrets: booleanValue(record, ['includesSecrets', 'includes_secrets']),
+    secretsRestored: numberValue(record, ['secretsRestored', 'secrets_restored'], 0),
+    restartRequired: booleanValue(record, ['restartRequired', 'restart_required'], true),
+    preRestorePath: optionalStringValue(record, ['preRestorePath', 'pre_restore_path']) ?? null,
+  }
 }

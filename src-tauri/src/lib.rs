@@ -10,6 +10,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(infrastructure::desktop_runtime::window_state_plugin())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             infrastructure::desktop_runtime::register_runtime_handles(app.handle());
 
@@ -42,6 +44,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             application::commands::get_app_build_info,
             application::commands::check_app_update,
+            application::commands::install_app_update,
             application::commands::get_companion_install_status,
             application::commands::install_companion,
             application::commands::get_migration_status,
@@ -154,6 +157,9 @@ pub fn run() {
             application::commands::runtime_log_window_status,
             application::commands::activate_main_window,
             application::commands::hide_main_window,
+            application::commands::export_workspace_backup,
+            application::commands::inspect_workspace_backup,
+            application::commands::import_workspace_backup,
             application::commands::route_notification_action
         ])
         .run(tauri::generate_context!())
