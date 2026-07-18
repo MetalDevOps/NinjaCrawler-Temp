@@ -154,6 +154,9 @@ pub fn run() {
             application::commands::runtime_log_window_status,
             application::commands::activate_main_window,
             application::commands::hide_main_window,
+            application::commands::export_workspace_backup,
+            application::commands::inspect_workspace_backup,
+            application::commands::import_workspace_backup,
             application::commands::route_notification_action
         ])
         .run(tauri::generate_context!())

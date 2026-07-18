@@ -1,5 +1,6 @@
 pub mod app_update;
 pub mod atomic_file;
+pub mod backup_crypto;
 pub mod companion_api;
 pub mod companion_install;
 pub mod connector_debug;
@@ -21,4 +22,5 @@ pub mod storage;
 pub mod tiktok_connector;
 pub mod tiktok_likes_runtime;
 pub mod twitter_connector;
+pub mod workspace_backup;
 pub mod workspace_repository;

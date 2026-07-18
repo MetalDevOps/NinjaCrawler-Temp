@@ -15,7 +15,7 @@ use crate::domain::models::{
 use crate::infrastructure::{
     app_update, connector_debug, connector_runtime, desktop_runtime, import_runtime,
     media_path_migration_runtime, media_thumbnail_runtime, single_video_runtime,
-    source_delete_runtime, source_sync_runtime, workspace_repository,
+    source_delete_runtime, source_sync_runtime, workspace_backup, workspace_repository,
 };
 
 fn publish_snapshot(
@@ -878,6 +878,27 @@ pub fn activate_main_window(
 #[tauri::command]
 pub fn hide_main_window(app: tauri::AppHandle) -> Result<DesktopRuntimeState, String> {
     desktop_runtime::hide_main_window(&app)
+}
+
+#[tauri::command]
+pub fn export_workspace_backup(
+    include_secrets: bool,
+    password: Option<String>,
+) -> Result<workspace_backup::BackupExportResult, String> {
+    workspace_backup::export_workspace_backup(include_secrets, password)
+}
+
+#[tauri::command]
+pub fn inspect_workspace_backup() -> Result<workspace_backup::BackupInspection, String> {
+    workspace_backup::inspect_workspace_backup()
+}
+
+#[tauri::command]
+pub fn import_workspace_backup(
+    path: String,
+    password: Option<String>,
+) -> Result<workspace_backup::BackupImportResult, String> {
+    workspace_backup::import_workspace_backup(path, password)
 }
 
 #[tauri::command]
