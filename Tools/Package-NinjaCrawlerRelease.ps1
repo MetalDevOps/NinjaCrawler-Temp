@@ -7,7 +7,13 @@ param(
     [string]$TargetTriple = "",
     [string]$ChangelogPath = "",
     [switch]$CompanionOnly,
-    [switch]$SkipCompanion
+    [switch]$SkipCompanion,
+    # Emit the tauri-plugin-updater `latest.json` manifest next to the installer.
+    # Requires the signed NSIS bundle produced by `bundle.createUpdaterArtifacts`
+    # (a matching `*-setup.exe.sig` must sit beside the installer). Off by default
+    # so local/CI packaging without signing keeps working; the release workflow
+    # opts in.
+    [switch]$GenerateUpdaterManifest
 )
 
 Set-StrictMode -Version Latest
@@ -16,6 +22,15 @@ $ErrorActionPreference = "Stop"
 if ($CompanionOnly -and $SkipCompanion) {
     throw "-CompanionOnly and -SkipCompanion are mutually exclusive."
 }
+
+if ($GenerateUpdaterManifest -and $CompanionOnly) {
+    throw "-GenerateUpdaterManifest cannot be combined with -CompanionOnly (there is no desktop installer to sign)."
+}
+
+# GitHub organization/repository that hosts the versioned release assets the
+# updater downloads. Keep this in sync with the endpoint configured under
+# `plugins.updater.endpoints` in src-tauri/tauri.conf.json.
+$updaterReleaseRepository = "JustShinobi/NinjaCrawler"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $releaseRoot = if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
@@ -70,6 +85,47 @@ if (-not $CompanionOnly) {
     Copy-Item -LiteralPath $executablePath -Destination $portableDestination
     Copy-Item -LiteralPath $nsisPath.FullName -Destination $nsisDestination
     $assets += @($portableDestination, $nsisDestination)
+
+    if ($GenerateUpdaterManifest) {
+        # `bundle.createUpdaterArtifacts` emits a detached minisign signature next
+        # to the NSIS installer (`<installer>.exe.sig`). Its absence means signing
+        # did not run (missing TAURI_SIGNING_PRIVATE_KEY* secrets), so fail hard
+        # rather than publish a manifest the updater can never verify.
+        $signaturePath = "$($nsisPath.FullName).sig"
+        if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+            throw "Updater signature not found: '$signaturePath'. The NSIS bundle was not signed; ensure TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD are set and `bundle.createUpdaterArtifacts` is enabled."
+        }
+
+        $signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
+        if ([string]::IsNullOrWhiteSpace($signature)) {
+            throw "Updater signature file is empty: '$signaturePath'."
+        }
+
+        # The manifest must reference the versioned release asset (not `latest`)
+        # using the exact file name published for the NSIS installer.
+        $setupAssetName = [System.IO.Path]::GetFileName($nsisDestination)
+        $downloadUrl = "https://github.com/$updaterReleaseRepository/releases/download/v$Version/$setupAssetName"
+        $pubDate = [System.DateTimeOffset]::UtcNow.ToString(
+            "yyyy-MM-ddTHH:mm:ssZ",
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+
+        $updaterManifest = [ordered]@{
+            version   = $Version
+            pub_date  = $pubDate
+            platforms = [ordered]@{
+                "windows-x86_64" = [ordered]@{
+                    signature = $signature
+                    url       = $downloadUrl
+                }
+            }
+        }
+
+        $latestJsonPath = Join-Path $outputPath "latest.json"
+        $updaterManifestJson = $updaterManifest | ConvertTo-Json -Depth 5
+        [System.IO.File]::WriteAllText($latestJsonPath, $updaterManifestJson)
+        $assets += $latestJsonPath
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($ChangelogPath)) {
         $resolvedChangelogPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ChangelogPath))

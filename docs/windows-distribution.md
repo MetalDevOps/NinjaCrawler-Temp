@@ -158,31 +158,30 @@ powershell -ExecutionPolicy Bypass -File Tools\Publish-NinjaCrawler.ps1 -Configu
 The desktop app ships with `tauri-plugin-updater` v2 wired end to end:
 
 - `src-tauri/tauri.conf.json` declares the updater endpoint
-  `https://github.com/JustShinobi/NinjaCrawler/releases/latest/download/latest.json`
-  and declares `bundle.createUpdaterArtifacts` (shipped as `false` until signing
-  is configured, so releases keep working out of the box).
+  `https://github.com/JustShinobi/NinjaCrawler/releases/latest/download/latest.json`,
+  the minisign public key, and `bundle.createUpdaterArtifacts: true` (release
+  builds sign the installer and emit a `.sig` sidecar).
 - The **About** panel shows an **Install update** button when a newer release is
   detected. It downloads the signed installer with a live progress indicator and
   relaunches the app.
 - The lightweight "update available" check (`check_app_update`) still queries the
   GitHub API directly and is independent of the signed updater flow.
 
-The repository ships a **placeholder** public key
-(`"TAURI_UPDATER_PUBKEY_PLACEHOLDER"`). While the placeholder is in place the
-app still runs and the "update available" banner still works; only the **Install
-update** action fails gracefully with a clear "auto-update is not configured"
-message. Nothing panics.
+Signing is already configured for this repository: the real public key is
+committed in `tauri.conf.json` and the CI secrets are set. If the pubkey were
+ever reset to a placeholder, the app would still run and the "update available"
+banner would still work; only the **Install update** action fails gracefully
+with a clear "auto-update is not configured" message. Nothing panics.
 
-### Operator setup (one-time manual steps)
+### Operator setup (one-time, or when rotating the key pair)
 
 Auto-update requires a minisign key pair. These steps are **not** automated
 because the private key must never be committed.
 
-1. **Generate the key pair** (needs the Tauri CLI, `cargo install tauri-cli` or
-   `npm run tauri`):
+1. **Generate the key pair** (uses the project-local Tauri CLI):
 
    ```powershell
-   cargo tauri signer generate -w %USERPROFILE%\.tauri\ninjacrawler-updater.key
+   npx tauri signer generate -w $env:USERPROFILE\.tauri\ninjacrawler-updater.key
    ```
 
    This prints a **public key** and writes a password-protected **private key**.
@@ -191,9 +190,9 @@ because the private key must never be committed.
    secret manager. Losing it means you cannot ship updates that existing installs
    will accept.
 
-3. **Publish the public key.** Replace the `"TAURI_UPDATER_PUBKEY_PLACEHOLDER"`
-   value of `plugins.updater.pubkey` in `src-tauri/tauri.conf.json` with the
-   generated public key, then commit that change.
+3. **Publish the public key.** Set `plugins.updater.pubkey` in
+   `src-tauri/tauri.conf.json` to the generated public key, then commit that
+   change.
 
 4. **Add the CI secrets.** In the GitHub repository settings add:
    - `TAURI_SIGNING_PRIVATE_KEY` — the contents of the generated `.key` file.
@@ -202,42 +201,53 @@ because the private key must never be committed.
    The **Build Release** step of `.github/workflows/release.yml` already consumes
    both secrets.
 
-5. **Enable updater artifacts.** Flip `bundle.createUpdaterArtifacts` to `true`
-   in `src-tauri/tauri.conf.json` (it ships as `false` so releases do not fail
-   while signing is unconfigured) and commit together with the pubkey change.
-   With it enabled but the secrets missing, the bundling step **fails** — so do
-   steps 3–5 as one change.
+5. **Keep updater artifacts enabled.** `bundle.createUpdaterArtifacts` must be
+   `true` in `src-tauri/tauri.conf.json`. With it enabled but the secrets
+   missing, the release bundling step **fails** — when rotating keys, land the
+   pubkey change and the new secrets together.
 
-### `latest.json` (release pipeline follow-up)
+### `latest.json` (automatic)
 
-The release is packaged by `Tools/Package-NinjaCrawlerRelease.ps1` and published
-by the `publish` job, not by `tauri-action`, so the updater manifest is **not**
-generated automatically. Once signing is configured, the signed bundle produces
-`*-setup.exe` plus a matching `*-setup.exe.sig`. To complete the auto-update
-loop, the packaging/publish flow must additionally:
+The updater manifest is now generated and published automatically by the release
+pipeline. When `Tools/Package-NinjaCrawlerRelease.ps1` runs with
+`-GenerateUpdaterManifest` (the release workflow's **Package release assets**
+step passes it), it reads the detached signature emitted next to the signed NSIS
+installer (`<installer>-setup.exe.sig`) and writes a `latest.json` in the
+tauri-plugin-updater v2 shape:
 
-- include the `*-setup.exe.sig` file alongside the installer in the release
-  assets (and in `SHA256SUMS.txt` / `BUILD-PROVENANCE.json` expectations), and
-- generate a `latest.json` manifest and attach it to the GitHub release so the
-  endpoint URL above resolves. Minimal shape:
-
-  ```json
-  {
-    "version": "0.24.1",
-    "notes": "See the release changelog.",
-    "pub_date": "2026-07-18T00:00:00Z",
-    "platforms": {
-      "windows-x86_64": {
-        "signature": "<contents of the .sig file>",
-        "url": "https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.24.1/NinjaCrawler-0.24.1-windows-x64-setup.exe"
-      }
+```json
+{
+  "version": "0.24.1",
+  "pub_date": "2026-07-18T00:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "<contents of the .sig file>",
+      "url": "https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.24.1/NinjaCrawler-0.24.1-windows-x64-setup.exe"
     }
   }
-  ```
+}
+```
 
-Until `latest.json` is attached to releases, the **Install update** button will
-report that no update manifest was found; the GitHub "update available" banner
-and manual download links continue to work.
+- `signature` is the **contents** of the installer's `.sig` file (not a path).
+- `url` points at the **versioned** release asset (`.../download/vX.Y.Z/...`),
+  using the exact name of the published NSIS setup.
+- `latest.json` is added to the published release assets and to `SHA256SUMS.txt`
+  like every other artifact. The signature is embedded in the manifest, so the
+  raw `.sig` file is not published separately.
+
+If signing did not run (the `TAURI_SIGNING_PRIVATE_KEY*` secrets are missing or
+`bundle.createUpdaterArtifacts` is disabled), the `.sig` sidecar is absent and
+packaging **fails fast** with a clear error instead of publishing an unsigned
+manifest. Local/CI packaging that omits `-GenerateUpdaterManifest` skips the
+manifest entirely and is unaffected.
+
+**Troubleshooting**
+
+- *Packaging fails with "Updater signature not found"*: the build step did not
+  sign the installer. Confirm both signing secrets are set (see the operator
+  setup above) and that `bundle.createUpdaterArtifacts` is `true`.
+- *Install update reports no manifest*: verify `latest.json` is attached to the
+  published release and reachable at the configured `latest` endpoint URL.
 
 ## Provider Extensibility Boundary
 

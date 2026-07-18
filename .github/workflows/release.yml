@@ -174,7 +174,8 @@ jobs:
               "NinjaCrawler-$VERSION-windows-x64-portable.exe" \
               "NinjaCrawler-$VERSION-windows-x64-setup.exe" \
               "NinjaCrawler-Companion-$COMPANION_VERSION.zip" \
-              SHA256SUMS.txt | sort)"
+              SHA256SUMS.txt \
+              latest.json | sort)"
             actual="$(find "$candidate" -maxdepth 1 -type f -printf '%f\n' | sort)"
             if [ "$actual" != "$expected" ]; then
               valid=false
@@ -361,6 +362,7 @@ jobs:
           -Version ${{ needs.prepare.outputs.version }}
           -TargetTriple x86_64-pc-windows-msvc
           -ChangelogPath artifacts/CHANGELOG.md
+          -GenerateUpdaterManifest
 
       - name: Record build provenance
         shell: pwsh
