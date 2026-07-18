@@ -17,13 +17,13 @@ Supports **Instagram** · **TikTok** · **X / Twitter** · optional **Chrome Com
 
 <p>
 <!-- ninjacrawler-release-start -->
-<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.24.1/NinjaCrawler-0.24.1-windows-x64-setup.exe">
+<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.25.0/NinjaCrawler-0.25.0-windows-x64-setup.exe">
   <img src="https://img.shields.io/badge/Download%20for%20Windows-x64-2ea44f?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows x64" height="46">
 </a>
 <!-- ninjacrawler-release-end -->
 &nbsp;
 <!-- ninjacrawler-companion-release-start -->
-<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.17.0/NinjaCrawler-Companion-0.17.0.zip">
+<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.18.0/NinjaCrawler-Companion-0.18.0.zip">
   <img src="https://img.shields.io/badge/Download%20Companion-Chrome-1f6feb?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Download Companion" height="46">
 </a>
 <!-- ninjacrawler-companion-release-end -->
@@ -32,9 +32,9 @@ Supports **Instagram** · **TikTok** · **X / Twitter** · optional **Chrome Com
 <!-- ninjacrawler-release-start -->
 <p>
 <sub>
-App v0.24.1 ·
-<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.24.1/NinjaCrawler-0.24.1-windows-x64-portable.exe">portable</a> ·
-<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.24.1/SHA256SUMS.txt">checksums</a> ·
+App v0.25.0 ·
+<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.25.0/NinjaCrawler-0.25.0-windows-x64-portable.exe">portable</a> ·
+<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.25.0/SHA256SUMS.txt">checksums</a> ·
 <a href="https://github.com/JustShinobi/NinjaCrawler/releases">all releases</a> ·
 <a href="CHANGELOG.md">changelog</a>
 </sub>
@@ -44,8 +44,8 @@ App v0.24.1 ·
 <!-- ninjacrawler-companion-release-start -->
 <p>
 <sub>
-Companion 0.17.0 ·
-<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.17.0/NinjaCrawler-Companion-0.17.0.zip">extension ZIP</a> ·
+Companion 0.18.0 ·
+<a href="https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.18.0/NinjaCrawler-Companion-0.18.0.zip">extension ZIP</a> ·
 <a href="https://github.com/JustShinobi/NinjaCrawler/releases?q=companion-v&amp;expanded=true">companion releases</a>
 </sub>
 </p>
@@ -95,9 +95,9 @@ NinjaCrawler is a **local-first** Windows app for operators who manage many soci
 ### Desktop app
 
 <!-- ninjacrawler-release-start -->
-1. **[Download NinjaCrawler for Windows](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.24.1/NinjaCrawler-0.24.1-windows-x64-setup.exe)** (setup installer).
-2. Prefer no install? Use the standalone [portable executable](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.24.1/NinjaCrawler-0.24.1-windows-x64-portable.exe).
-3. Optional: verify the file against [SHA256SUMS.txt](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.24.1/SHA256SUMS.txt).
+1. **[Download NinjaCrawler for Windows](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.25.0/NinjaCrawler-0.25.0-windows-x64-setup.exe)** (setup installer).
+2. Prefer no install? Use the standalone [portable executable](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.25.0/NinjaCrawler-0.25.0-windows-x64-portable.exe).
+3. Optional: verify the file against [SHA256SUMS.txt](https://github.com/JustShinobi/NinjaCrawler/releases/download/v0.25.0/SHA256SUMS.txt).
 <!-- ninjacrawler-release-end -->
 
 > [!WARNING]
@@ -108,7 +108,7 @@ On first launch the app downloads and verifies connector runtimes (internet requ
 ### Chrome Companion (optional)
 
 <!-- ninjacrawler-companion-release-start -->
-1. **[Download the Companion ZIP](https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.17.0/NinjaCrawler-Companion-0.17.0.zip)** (also attached to desktop app releases).
+1. **[Download the Companion ZIP](https://github.com/JustShinobi/NinjaCrawler/releases/download/companion-v0.18.0/NinjaCrawler-Companion-0.18.0.zip)** (also attached to desktop app releases).
 2. Extract it. The archive always contains a stable `NinjaCrawler-Companion` folder.
 3. Start NinjaCrawler, open `chrome://extensions`, enable **Developer mode**, then **Load unpacked** and select that folder.
 <!-- ninjacrawler-companion-release-end -->

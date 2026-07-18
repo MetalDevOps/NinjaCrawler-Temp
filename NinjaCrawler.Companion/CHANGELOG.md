@@ -1,11 +1,18 @@
 # Changelog
 
+## [0.18.0](https://github.com/JustShinobi/NinjaCrawler/compare/companion-v0.17.1...companion-v0.18.0) (2026-07-17)
+
+
+### Features
+
+* **companion:** support automated updates and improve story detection ([#66](https://github.com/JustShinobi/NinjaCrawler/issues/66)) ([30cbbc7](https://github.com/JustShinobi/NinjaCrawler/commit/30cbbc73306394982918fdb81e70c780c73ad448))
+
 ## [0.17.1](https://github.com/JustShinobi/NinjaCrawler/compare/companion-v0.17.0...companion-v0.17.1) (2026-07-16)
 
 
 ### Bug Fixes
 
-* **companion:** stop treating Instagram highlights as [@highlights](https://github.com/highlights) ([#52](https://github.com/JustShinobi/NinjaCrawler/issues/52)) ([a09e365](https://github.com/JustShinobi/NinjaCrawler/commit/a09e36584287b9962d644361ef48c544a61cbaa0))
+* **companion:** stop treating Instagram highlights as `@highlights` ([#52](https://github.com/JustShinobi/NinjaCrawler/issues/52)) ([a09e365](https://github.com/JustShinobi/NinjaCrawler/commit/a09e36584287b9962d644361ef48c544a61cbaa0))
 
 ## [0.17.0](https://github.com/JustShinobi/NinjaCrawler/compare/companion-v0.16.0...companion-v0.17.0) (2026-07-16)
 

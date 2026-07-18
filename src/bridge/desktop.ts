@@ -18,9 +18,12 @@ import type {
   AppBuildInfo,
   AppUpdateProgress,
   AppUpdateStatus,
+  MigrationStatus,
+  MigrationProgress,
   AuthMode,
   AuthState,
   ConnectorRuntimeStatus,
+  CompanionInstallStatus,
   ConnectorDebugEntry,
   ConnectorDebugEventType,
   ConnectorDebugQuery,
@@ -1707,6 +1710,17 @@ function normalizeConnectorRuntimeStatus(value: unknown): ConnectorRuntimeStatus
   }
 }
 
+function normalizeCompanionInstallStatus(value: unknown): CompanionInstallStatus {
+  const record = isRecord(value) ? value : {}
+  return {
+    installPath: stringValue(record, ['installPath', 'install_path'], ''),
+    stagedVersion: optionalStringValue(record, ['stagedVersion', 'staged_version']),
+    availableVersion: stringValue(record, ['availableVersion', 'available_version'], 'unknown'),
+    updateReady: booleanValue(record, ['updateReady', 'update_ready'], false),
+    downloadUrl: stringValue(record, ['downloadUrl', 'download_url'], ''),
+  }
+}
+
 function normalizeImportProblem(value: unknown): ImportProblem | null {
   if (!isRecord(value)) {
     return null
@@ -2218,6 +2232,20 @@ export async function prepareConnectorRuntimes(): Promise<WorkspaceSnapshot> {
   return invokeWorkspaceCommand('prepare_connector_runtimes')
 }
 
+export async function getCompanionInstallStatus(): Promise<CompanionInstallStatus> {
+  return normalizeCompanionInstallStatus(await invoke<unknown>('get_companion_install_status'))
+}
+
+export async function installCompanion(): Promise<CompanionInstallStatus> {
+  return normalizeCompanionInstallStatus(await invoke<unknown>('install_companion'))
+}
+
+export async function openCompanionInstallFolder(path: string): Promise<void> {
+  if (path.trim().length > 0) {
+    await openPath(path)
+  }
+}
+
 export async function checkConnectorUpdates(key?: string): Promise<ConnectorRuntimeStatus[]> {
   const result = await invoke<unknown>('check_connector_updates', key ? { key } : {})
   return Array.isArray(result)
@@ -2595,6 +2623,57 @@ export async function subscribeToSourceSyncQueue(
   })
 }
 
+// --- Migração de schema no boot (tela de migração da janela principal) ---
+
+export async function getMigrationStatus(): Promise<MigrationStatus | null> {
+  const raw = await invoke<unknown>('get_migration_status')
+  if (!isRecord(raw)) return null
+  return {
+    fromVersion: optionalNumberValue(raw, ['fromVersion', 'from_version']) ?? 0,
+    toVersion: optionalNumberValue(raw, ['toVersion', 'to_version']) ?? 0,
+    pendingCount: optionalNumberValue(raw, ['pendingCount', 'pending_count']) ?? 0,
+    dbSizeBytes: optionalNumberValue(raw, ['dbSizeBytes', 'db_size_bytes']) ?? 0,
+  }
+}
+
+export async function runPendingMigrations(): Promise<void> {
+  await invoke<void>('run_pending_migrations')
+}
+
+export async function subscribeToMigrationProgress(
+  onProgress: (progress: MigrationProgress) => void,
+): Promise<() => void> {
+  return listen('migration://progress', (event) => {
+    const raw = event.payload
+    if (!isRecord(raw)) return
+    onProgress({
+      phase: raw.phase === 'backup' ? 'backup' : 'migrate',
+      current: optionalNumberValue(raw, ['current']) ?? 0,
+      total: optionalNumberValue(raw, ['total']) ?? 0,
+      label: typeof raw.label === 'string' ? raw.label : '',
+    })
+  })
+}
+
+export async function subscribeToMigrationCompletion(
+  onDone: () => void,
+  onError: (message: string) => void,
+): Promise<() => void> {
+  const unlistenDone = await listen('migration://done', () => onDone())
+  const unlistenError = await listen('migration://error', (event) => {
+    onError(typeof event.payload === 'string' ? event.payload : 'Migration failed.')
+  })
+  return () => {
+    unlistenDone()
+    unlistenError()
+  }
+}
+
+export async function openBackupsFolder(): Promise<void> {
+  const path = await invoke<string>('backups_folder_path')
+  await openPath(path)
+}
+
 export async function loadSourceDeleteQueueStatus(): Promise<SourceDeleteQueueStatus> {
   const result = await withTimeout(
     invoke<unknown>('source_delete_queue_status'),
@@ -2647,6 +2726,13 @@ function parseSourceMediaGallery(raw: unknown, sourceId: string): SourceMediaGal
     provider: stringValue(value, ['provider'], 'instagram') as SourceMediaGallery['provider'],
     handle: stringValue(value, ['handle'], ''),
     profileUrl: stringValue(value, ['profileUrl', 'profile_url'], ''),
+    // Metadados de perfil da última sync (Fase 3); ausentes em perfis sem sync.
+    biography: optionalStringValue(value, ['biography']),
+    followerCount: optionalNumberValue(value, ['followerCount', 'follower_count']),
+    followingCount: optionalNumberValue(value, ['followingCount', 'following_count']),
+    mediaCount: optionalNumberValue(value, ['mediaCount', 'media_count']),
+    isVerified: value.isVerified === true || value.is_verified === true,
+    statsUpdatedAt: optionalStringValue(value, ['statsUpdatedAt', 'stats_updated_at']),
     posts: posts.filter(isRecord).map((post) => ({
       postId: optionalStringValue(post, ['postId', 'post_id']),
       postUrl: optionalStringValue(post, ['postUrl', 'post_url']),

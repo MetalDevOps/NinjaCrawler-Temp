@@ -12,10 +12,11 @@ use crate::domain::models::{
     SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview, SyncPlanTargetPreviewInput,
     SyncPlanUpsert, WorkspaceSnapshot,
 };
+use crate::domain::models::MigrationStatus;
 use crate::infrastructure::{
-    app_update, connector_debug, connector_runtime, desktop_runtime, import_runtime,
-    media_path_migration_runtime, media_thumbnail_runtime, single_video_runtime,
-    source_delete_runtime, source_sync_runtime, workspace_backup, workspace_repository,
+    app_update, companion_install, connector_debug, connector_runtime, database, desktop_runtime,
+    import_runtime, media_path_migration_runtime, media_thumbnail_runtime, single_video_runtime,
+    source_delete_runtime, source_sync_runtime, storage, workspace_backup, workspace_repository,
 };
 
 fn publish_snapshot(
@@ -41,6 +42,66 @@ pub async fn check_app_update() -> Result<AppUpdateStatus, String> {
 #[tauri::command]
 pub async fn install_app_update(app: tauri::AppHandle) -> Result<(), String> {
     app_update::install_update(app).await
+}
+
+#[tauri::command]
+pub fn get_companion_install_status() -> Result<companion_install::CompanionInstallStatus, String> {
+    companion_install::managed_install_status()
+}
+
+#[tauri::command]
+pub async fn install_companion() -> Result<companion_install::CompanionInstallStatus, String> {
+    tauri::async_runtime::spawn_blocking(companion_install::install_managed_companion)
+        .await
+        .map_err(|error| format!("Companion install worker failed: {error}"))?
+}
+
+/// Pré-checagem de migrations pendentes (read-only, não roda nada). O frontend
+/// chama isto ANTES de qualquer acesso ao banco: se retornar `Some`, mostra a
+/// tela de migração; se `None`, o boot já seguiu normal e o app pode carregar.
+#[tauri::command]
+pub fn get_migration_status() -> Result<Option<MigrationStatus>, String> {
+    let layout = storage::ensure_workspace_layout().map_err(|error| error.to_string())?;
+    database::migration_precheck(&layout.db_path)
+}
+
+/// Roda o backup + as migrations pendentes com progresso (eventos
+/// `migration://progress`), e ao concluir inicia os serviços de runtime que
+/// foram adiados no boot. Emite `migration://done` no sucesso e
+/// `migration://error` na falha.
+#[tauri::command]
+pub async fn run_pending_migrations(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+    tauri::async_runtime::spawn_blocking(move || {
+        let layout = storage::ensure_workspace_layout().map_err(|error| error.to_string())?;
+        let emitter = app.clone();
+        let result = database::run_pending_migrations_with_progress(&layout.db_path, move |progress| {
+            let _ = emitter.emit("migration://progress", progress);
+        });
+        match result {
+            Ok(()) => {
+                desktop_runtime::start_runtime_services(app.clone())?;
+                let _ = app.emit("migration://done", ());
+                Ok(())
+            }
+            Err(error) => {
+                let _ = app.emit("migration://error", error.clone());
+                Err(error)
+            }
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Caminho da pasta de backups (o frontend abre no explorer após uma falha de
+/// migração, para restaurar manualmente).
+#[tauri::command]
+pub fn backups_folder_path() -> Result<String, String> {
+    let layout = storage::ensure_workspace_layout().map_err(|error| error.to_string())?;
+    let backups_dir = layout.data_dir.join("backups");
+    std::fs::create_dir_all(&backups_dir).map_err(|error| error.to_string())?;
+    Ok(backups_dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
