@@ -40,12 +40,12 @@
       "endpoints": [
         "https://github.com/JustShinobi/NinjaCrawler/releases/latest/download/latest.json"
       ],
-      "pubkey": "TAURI_UPDATER_PUBKEY_PLACEHOLDER"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZCRUEwNjEwNjc2MDYzNjUKUldSbFkyQm5FQWJxKy9lRElrSGlZeEdwUERZa0dFWEQ2SmVOdU9ta0dZa3h1UFlrVU5WejZ3cHIK"
     }
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "targets": [
       "nsis"
     ],
