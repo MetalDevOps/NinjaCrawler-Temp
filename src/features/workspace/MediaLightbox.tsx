@@ -3,42 +3,42 @@ import type { ReactNode } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 
 /**
- * Lightbox de mídia compartilhado entre Profile View e Single Videos. Reproduz
- * vídeo/imagem inline (via convertFileSrc, sem passar pelo path-scope do opener)
- * com navegação anterior/próximo. Fonte única de verdade do preview.
+ * Shared media lightbox for Profile View and Single Videos. Plays video/image
+ * inline (via convertFileSrc, without the opener path-scope) with previous/next
+ * navigation. Single source of truth for the preview.
  *
- * Atalhos:
- * - ↑/↓: post/item anterior/próximo (eixo vertical — NÃO percorre slides)
- * - ←/→ em carrossel: slide anterior/próximo do mesmo post
- * - ←/→ em vídeo: seek ±1s
- * - Enter: tela cheia do lightbox (preserva estado ao trocar mídia)
- * - Escape: sai da tela cheia se ativa; senão fecha
+ * Shortcuts:
+ * - ↑/↓: previous/next post or top-level item (vertical axis — does NOT walk slides)
+ * - ←/→ on carousel: previous/next slide of the same post
+ * - ←/→ on video: seek ±1s
+ * - Enter: fullscreen the lightbox (state survives media type switches)
+ * - Escape: exit fullscreen if active; otherwise close
  */
 export interface MediaLightboxProps {
   fileAbsPath: string
   isVideo: boolean
-  /** Navegação vertical (entre posts / itens de nível superior). */
+  /** Vertical navigation (between posts / top-level items). */
   hasPrev: boolean
   hasNext: boolean
   onPrev: () => void
   onNext: () => void
   onClose: () => void
   /**
-   * Navegação horizontal dentro de um carrossel/slideshow. Quando omitida,
-   * ←/→ em foto não navegam (só seek em vídeo); os botões laterais caem no
-   * eixo vertical.
+   * Horizontal navigation within a carousel/slideshow. When omitted, ←/→ on
+   * photos do not navigate (only video seek); side buttons fall back to the
+   * vertical axis.
    */
   hasSlidePrev?: boolean
   hasSlideNext?: boolean
   onSlidePrev?: () => void
   onSlideNext?: () => void
-  /** Nome exibido acima da mídia (@autor do like ou handle do perfil). */
+  /** Label above the media (@like author or profile handle). */
   title?: string
-  /** Meta secundária (ex.: "1.2K views · 2/5"). */
+  /** Secondary meta (e.g. "1.2K views · 2/5"). */
   meta?: string
-  /** Faixa de áudio separada para slideshows. */
+  /** Separate audio track for slideshows. */
   audioAbsPath?: string
-  /** Ações abaixo do preview (Open online / Reveal / etc.). */
+  /** Actions below the preview (Open online / Reveal / etc.). */
   actions?: ReactNode
 }
 
@@ -46,15 +46,15 @@ const VIDEO_SEEK_SECONDS = 1
 
 function isInteractiveKeyTarget(target: EventTarget | null, root: HTMLElement | null): boolean {
   if (!(target instanceof Element)) return false
-  // Não tratar <audio>/<video> como “interactive” para setas — senão o carrossel
-  // com trilha some as teclas ←/→ enquanto o player tem foco.
+  // Do not treat <audio>/<video> as “interactive” for arrows — otherwise a
+  // carousel with a soundtrack steals ←/→ while the player is focused.
   const interactive = target.closest(
     'button, input, textarea, select, a[href], [contenteditable="true"]',
   )
   return Boolean(interactive && root?.contains(interactive))
 }
 
-/** True se o lightbox (ou um descendente) estiver em fullscreen do documento. */
+/** True if the lightbox (or a descendant) is the document fullscreen element. */
 function isLightboxFullscreen(root: HTMLElement | null): boolean {
   const active = document.fullscreenElement
   if (!root || !active) return false
@@ -85,8 +85,8 @@ export function MediaLightbox({
   const lightboxRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
 
-  // Refs: o listener de teclado fica montado 1× e sempre lê o estado atual.
-  // Evita setas “mortas” por closure stale após trocar slide/post.
+  // Refs: keyboard listener mounts once and always reads current state.
+  // Avoids “dead” arrows from a stale closure after switching slide/post.
   const navRef = useRef({
     isVideo,
     hasPrev,
@@ -116,8 +116,8 @@ export function MediaLightbox({
     lightboxRef.current?.focus()
   }, [])
 
-  // Re-foca o dialog ao trocar mídia (ex.: após ←/→), para as setas não caírem
-  // em botões de ação / controles nativos.
+  // Re-focus the dialog when media changes (e.g. after ←/→) so arrows do not
+  // land on action buttons / native controls.
   useEffect(() => {
     lightboxRef.current?.focus()
   }, [fileAbsPath])
@@ -162,7 +162,7 @@ export function MediaLightbox({
         }
         handled = true
       } else if (isArrow(event, 'Down')) {
-        // Vertical = post/item (nunca slide).
+        // Vertical = post/item (never slide).
         if (nav.hasNext) nav.onNext()
         handled = true
       } else if (isArrow(event, 'Up')) {

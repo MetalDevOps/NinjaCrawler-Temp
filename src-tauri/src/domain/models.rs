@@ -472,8 +472,8 @@ pub struct MediaGalleryPost {
     pub share_count: Option<i64>,
     pub stats_updated_at: Option<String>,
     pub files: Vec<MediaGalleryFile>,
-    /// Trilha sonora de slideshow/carrossel (TikTok photo-mode), quando presente
-    /// em disco como `<post_id>_audio.<ext>`.
+    /// Slideshow/carousel soundtrack (TikTok photo-mode), when present on disk
+    /// as `<post_id>_audio.<ext>`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_relative_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

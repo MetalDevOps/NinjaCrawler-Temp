@@ -15162,7 +15162,7 @@ textarea.accounts-field-mono {
   text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
 }
 
-/* Meta secundária (views, etc.) sob o título no modo de visualização. */
+/* Secondary meta (views, etc.) under the title in view mode. */
 .profile-view-lightbox-meta {
   color: rgba(255, 255, 255, 0.78);
   font-size: 0.82rem;
@@ -15180,8 +15180,8 @@ textarea.accounts-field-mono {
   background: #000;
 }
 
-/* Tela cheia no container do lightbox (Enter) — sobrevive à troca vídeo↔foto.
-   A mídia preenche o viewport (object-fit: contain); chrome vira overlay. */
+/* Fullscreen on the lightbox container (Enter) — survives video↔photo switches.
+   Media fills the viewport (object-fit: contain); chrome becomes overlay. */
 .profile-view-lightbox:fullscreen,
 .profile-view-lightbox:-webkit-full-screen {
   background: #000;

@@ -1053,10 +1053,10 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
   }, [sortedPosts])
 
   /**
-   * Chave de agrupamento do lightbox: um carrossel = um grupo.
-   * - post multi-arquivo → agrupa por postId / 1º arquivo
-   * - postId compartilhado (mesmo que o gallery tenha fragmentado) → mesmo grupo
-   * - senão cada arquivo é um item vertical isolado
+   * Lightbox grouping key: one carousel = one group.
+   * - multi-file post → group by postId / first file
+   * - shared postId (even if gallery split the post) → same group
+   * - otherwise each file is an isolated vertical item
    */
   const lightboxGroupKey = useCallback((item: FlatItem): string => {
     const postId = item.post.postId?.trim()
@@ -1065,7 +1065,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     return `file:${item.file.relativePath}`
   }, [])
 
-  /** Faixas contíguas [start, end] na lista plana (um grupo = um “post” no eixo vertical). */
+  /** Contiguous [start, end] ranges on the flat list (one group = one “post” on the vertical axis). */
   const lightboxGroups = useMemo(() => {
     const groups: { key: string; start: number; end: number }[] = []
     for (let i = 0; i < flatItems.length; i++) {
@@ -1113,7 +1113,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     [lightboxGroups],
   )
 
-  /** ↑/↓: salta entre grupos (posts/carrosséis), sempre no 1º slide do alvo. */
+  /** ↑/↓: jump between groups (posts/carousels), always landing on the target’s first slide. */
   const stepLightboxPost = useCallback(
     (delta: number) => {
       setLightboxIndex((current) => {
@@ -1128,7 +1128,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
     [findLightboxGroupIndex, lightboxGroups],
   )
 
-  /** ←/→ em carrossel: slide anterior/próximo dentro do mesmo grupo. */
+  /** ←/→ on carousel: previous/next slide within the same group. */
   const stepLightboxSlide = useCallback(
     (delta: number) => {
       setLightboxIndex((current) => {
@@ -1497,7 +1497,7 @@ export function ProfileViewPage({ initialSourceId }: ProfileViewPageProps) {
 
   const totalMedia = gallery?.posts.reduce((sum, post) => sum + post.files.length, 0) ?? 0
   const activeItem = lightboxIndex !== undefined ? flatItems[lightboxIndex] : undefined
-  /** Grupo (post/carrossel) ativo na lista plana do lightbox. */
+  /** Active group (post/carousel) on the flat lightbox list. */
   const activeLightboxGroup = useMemo(() => {
     if (lightboxIndex === undefined) return undefined
     return lightboxGroups.find(

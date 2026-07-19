@@ -1252,9 +1252,9 @@ where
             .unwrap_or("")
             .to_ascii_lowercase();
         if is_audio_only_video_download(&extension, video_codec) {
-            // TikTok photo-mode: trilha vira MP4 sem stream de vídeo. Guarda como
-            // `<post_id>_audio.<ext>` para o Profile View / lightbox; o post
-            // ainda cai no fallback de imagens (não marca como produced).
+            // TikTok photo-mode: track becomes an MP4 with no video stream. Save as
+            // `<post_id>_audio.<ext>` for Profile View / lightbox; the post still
+            // falls through to the image fallback (do not mark as produced).
             connector_debug::append_current(
                 "internal.tiktok",
                 "system",
@@ -1268,8 +1268,8 @@ where
             continue;
         }
         if AUDIO_EXTENSIONS.contains(&extension.as_str()) {
-            // Trilha do slideshow (yt-dlp baixa o áudio; imagens vêm no fallback
-            // photo-page). Mantém no perfil com a convenção do Single Videos.
+            // Slideshow soundtrack (yt-dlp downloads the audio; images come from
+            // the photo-page fallback). Keep on the profile using Single Videos naming.
             let _ = persist_slideshow_audio(request, &source_path, post_id, &extension);
             continue;
         }
@@ -1341,9 +1341,9 @@ fn is_audio_only_video_download(extension: &str, video_codec: &str) -> bool {
         )
 }
 
-/// Persiste a trilha sonora de um post photo-mode como `<post_id>_audio.<ext>`
-/// na raiz do perfil (mesma convenção do Single Videos / gallery lookup).
-/// Não marca o post como produzido — as imagens ainda precisam ser baixadas.
+/// Persist a photo-mode post soundtrack as `<post_id>_audio.<ext>` at the
+/// profile root (same convention as Single Videos / gallery lookup).
+/// Does not mark the post as produced — images still need to be downloaded.
 fn persist_slideshow_audio(
     request: &TikTokConnectorRequest,
     source_path: &Path,

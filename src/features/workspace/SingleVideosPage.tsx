@@ -313,7 +313,7 @@ export function SingleVideosPage() {
   )
   const closeLightbox = useCallback(() => setLightboxIndex(undefined), [])
 
-  /** Índices do 1º arquivo de cada vídeo na lista plana do lightbox. */
+  /** Indices of the first file of each video on the flat lightbox list. */
   const videoStartIndices = useMemo(() => {
     const starts: number[] = []
     let lastId: string | undefined

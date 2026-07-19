@@ -2,12 +2,12 @@ use super::*;
 
 pub(super) const GALLERY_VIDEO_EXTS: [&str; 5] = ["mp4", "webm", "mkv", "mov", "m4v"];
 pub(super) const GALLERY_IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "webp", "heic", "gif"];
-/// Extensões de trilha sonora de slideshow (TikTok photo-mode / single videos).
+/// Slideshow soundtrack extensions (TikTok photo-mode / single videos).
 pub(super) const GALLERY_AUDIO_EXTS: [&str; 6] = ["mp3", "m4a", "wav", "opus", "aac", "mp4"];
 
-/// Localiza `<post_id>_audio.<ext>` ao lado das imagens do post (ou na raiz do
-/// perfil). Mesma convenção do Single Videos — o connector do perfil passa a
-/// preservar essa trilha em vez de descartá-la.
+/// Find `<post_id>_audio.<ext>` next to the post images (or at the profile root).
+/// Same convention as Single Videos — the profile connector now keeps this
+/// track instead of discarding it.
 pub(super) fn find_slideshow_audio(
     profile_root: &Path,
     files: &[MediaGalleryFile],
@@ -642,7 +642,7 @@ pub fn load_source_media_gallery(source_id: String) -> Result<SourceMediaGallery
                 } else {
                     acc.ledger_post_key.as_deref().or(acc.post_id.as_deref())
                 };
-                // Trilha de slideshow: só faz sentido em multi-imagem / photo-mode.
+                // Slideshow soundtrack: only meaningful for multi-image / photo-mode.
                 let (audio_relative_path, audio_absolute_path) =
                     if !is_video && (media_type == "slideshow" || files.len() > 1) {
                         find_slideshow_audio(
