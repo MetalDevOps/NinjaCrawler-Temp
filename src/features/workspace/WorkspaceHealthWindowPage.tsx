@@ -1132,12 +1132,9 @@ function Storage({
     !similarityEngine.installed ||
     !similarityEngine.ffmpegAvailable ||
     Boolean(similarityEngine.error || similarityEngine.ffmpegError);
-  const [runtimeExpanded, setRuntimeExpanded] = useState(runtimeNeedsAttention);
-  useEffect(() => {
-    if (runtimeNeedsAttention) {
-      setRuntimeExpanded(true);
-    }
-  }, [runtimeNeedsAttention]);
+  // User toggle only; force-open when tools need attention so we never setState in an effect.
+  const [runtimeExpandedByUser, setRuntimeExpandedByUser] = useState(false);
+  const runtimeExpanded = runtimeNeedsAttention || runtimeExpandedByUser;
   const sourceJobs = dedupe?.sourceJobs ?? [];
   const completedSourceJobs = sourceJobs.filter(
     (job) => job.status === "completed",
@@ -1295,7 +1292,7 @@ function Storage({
         {dedupe ? (
           <details
             className="health-runtime-disclosure"
-            onToggle={(event) => setRuntimeExpanded(event.currentTarget.open)}
+            onToggle={(event) => setRuntimeExpandedByUser(event.currentTarget.open)}
             open={runtimeExpanded}
           >
             <summary>
