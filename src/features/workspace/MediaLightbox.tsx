@@ -3,23 +3,42 @@ import type { ReactNode } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 
 /**
- * Lightbox de mídia compartilhado entre Profile View e Single Videos. Reproduz
- * vídeo/imagem inline (via convertFileSrc, sem passar pelo path-scope do opener)
- * com navegação anterior/próximo. Fonte única de verdade do preview.
+ * Shared media lightbox for Profile View and Single Videos. Plays video/image
+ * inline (via convertFileSrc, without the opener path-scope) with previous/next
+ * navigation. Single source of truth for the preview.
+ *
+ * Shortcuts:
+ * - ↑/↓: previous/next post or top-level item (vertical axis — does NOT walk slides)
+ * - ←/→ on carousel: previous/next slide of the same post
+ * - ←/→ on video: seek ±1s
+ * - Enter: fullscreen the lightbox (state survives media type switches)
+ * - Escape: exit fullscreen if active; otherwise close
  */
 export interface MediaLightboxProps {
   fileAbsPath: string
   isVideo: boolean
+  /** Vertical navigation (between posts / top-level items). */
   hasPrev: boolean
   hasNext: boolean
   onPrev: () => void
   onNext: () => void
   onClose: () => void
-  /** Nome exibido acima da mídia (@autor do like ou handle do perfil). */
+  /**
+   * Horizontal navigation within a carousel/slideshow. When omitted, ←/→ on
+   * photos do not navigate (only video seek); side buttons fall back to the
+   * vertical axis.
+   */
+  hasSlidePrev?: boolean
+  hasSlideNext?: boolean
+  onSlidePrev?: () => void
+  onSlideNext?: () => void
+  /** Label above the media (@like author or profile handle). */
   title?: string
-  /** Faixa de áudio separada para slideshows. */
+  /** Secondary meta (e.g. "1.2K views · 2/5"). */
+  meta?: string
+  /** Separate audio track for slideshows. */
   audioAbsPath?: string
-  /** Ações abaixo do preview (Open online / Reveal / etc.). */
+  /** Actions below the preview (Open online / Reveal / etc.). */
   actions?: ReactNode
 }
 
@@ -27,8 +46,23 @@ const VIDEO_SEEK_SECONDS = 1
 
 function isInteractiveKeyTarget(target: EventTarget | null, root: HTMLElement | null): boolean {
   if (!(target instanceof Element)) return false
-  const interactive = target.closest('button, input, textarea, select, a[href], [contenteditable="true"]')
+  // Do not treat <audio>/<video> as “interactive” for arrows — otherwise a
+  // carousel with a soundtrack steals ←/→ while the player is focused.
+  const interactive = target.closest(
+    'button, input, textarea, select, a[href], [contenteditable="true"]',
+  )
   return Boolean(interactive && root?.contains(interactive))
+}
+
+/** True if the lightbox (or a descendant) is the document fullscreen element. */
+function isLightboxFullscreen(root: HTMLElement | null): boolean {
+  const active = document.fullscreenElement
+  if (!root || !active) return false
+  return active === root || root.contains(active)
+}
+
+function isArrow(event: KeyboardEvent, direction: 'Up' | 'Down' | 'Left' | 'Right'): boolean {
+  return event.key === `Arrow${direction}` || event.code === `Arrow${direction}`
 }
 
 export function MediaLightbox({
@@ -39,16 +73,57 @@ export function MediaLightbox({
   onPrev,
   onNext,
   onClose,
+  hasSlidePrev = false,
+  hasSlideNext = false,
+  onSlidePrev,
+  onSlideNext,
   title,
+  meta,
   audioAbsPath,
   actions,
 }: MediaLightboxProps) {
   const lightboxRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
 
+  // Refs: keyboard listener mounts once and always reads current state.
+  // Avoids “dead” arrows from a stale closure after switching slide/post.
+  // Updated in an effect (not during render) to satisfy react-hooks/refs.
+  const navRef = useRef({
+    isVideo,
+    hasPrev,
+    hasNext,
+    hasSlidePrev,
+    hasSlideNext,
+    onPrev,
+    onNext,
+    onClose,
+    onSlidePrev,
+    onSlideNext,
+  })
+  useEffect(() => {
+    navRef.current = {
+      isVideo,
+      hasPrev,
+      hasNext,
+      hasSlidePrev,
+      hasSlideNext,
+      onPrev,
+      onNext,
+      onClose,
+      onSlidePrev,
+      onSlideNext,
+    }
+  })
+
   useEffect(() => {
     lightboxRef.current?.focus()
   }, [])
+
+  // Re-focus the dialog when media changes (e.g. after ←/→) so arrows do not
+  // land on action buttons / native controls.
+  useEffect(() => {
+    lightboxRef.current?.focus()
+  }, [fileAbsPath])
 
   useEffect(() => {
     const seekVideo = (delta: number) => {
@@ -63,13 +138,13 @@ export function MediaLightbox({
     }
 
     const toggleFullscreen = () => {
-      const video = videoRef.current
-      if (!video) return false
-      if (document.fullscreenElement === video) {
+      const root = lightboxRef.current
+      if (!root) return false
+      if (isLightboxFullscreen(root)) {
         const exitFullscreen = document.exitFullscreen?.()
         void exitFullscreen?.catch(() => undefined)
       } else {
-        const requestFullscreen = video.requestFullscreen?.()
+        const requestFullscreen = root.requestFullscreen?.()
         void requestFullscreen?.catch(() => undefined)
       }
       return true
@@ -78,21 +153,39 @@ export function MediaLightbox({
     const handleKeyDown = (event: KeyboardEvent) => {
       if (isInteractiveKeyTarget(event.target, lightboxRef.current)) return
 
+      const nav = navRef.current
       let handled = false
+
       if (event.key === 'Escape') {
-        onClose()
+        if (isLightboxFullscreen(lightboxRef.current)) {
+          const exitFullscreen = document.exitFullscreen?.()
+          void exitFullscreen?.catch(() => undefined)
+        } else {
+          nav.onClose()
+        }
         handled = true
-      } else if (event.key === 'ArrowDown') {
-        if (hasNext) onNext()
+      } else if (isArrow(event, 'Down')) {
+        // Vertical = post/item (never slide).
+        if (nav.hasNext) nav.onNext()
         handled = true
-      } else if (event.key === 'ArrowUp') {
-        if (hasPrev) onPrev()
+      } else if (isArrow(event, 'Up')) {
+        if (nav.hasPrev) nav.onPrev()
         handled = true
-      } else if (event.key === 'ArrowRight' && isVideo) {
-        handled = seekVideo(VIDEO_SEEK_SECONDS)
-      } else if (event.key === 'ArrowLeft' && isVideo) {
-        handled = seekVideo(-VIDEO_SEEK_SECONDS)
-      } else if (event.key === 'Enter' && isVideo) {
+      } else if (isArrow(event, 'Right')) {
+        if (nav.isVideo) {
+          handled = seekVideo(VIDEO_SEEK_SECONDS)
+        } else if (nav.hasSlideNext && nav.onSlideNext) {
+          nav.onSlideNext()
+          handled = true
+        }
+      } else if (isArrow(event, 'Left')) {
+        if (nav.isVideo) {
+          handled = seekVideo(-VIDEO_SEEK_SECONDS)
+        } else if (nav.hasSlidePrev && nav.onSlidePrev) {
+          nav.onSlidePrev()
+          handled = true
+        }
+      } else if (event.key === 'Enter') {
         handled = toggleFullscreen()
       }
 
@@ -104,7 +197,18 @@ export function MediaLightbox({
 
     document.addEventListener('keydown', handleKeyDown, true)
     return () => document.removeEventListener('keydown', handleKeyDown, true)
-  }, [hasNext, hasPrev, isVideo, onClose, onNext, onPrev])
+  }, [])
+
+  const canGoSidePrev = hasSlidePrev || hasPrev
+  const canGoSideNext = hasSlideNext || hasNext
+  const goSidePrev = () => {
+    if (hasSlidePrev && onSlidePrev) onSlidePrev()
+    else if (hasPrev) onPrev()
+  }
+  const goSideNext = () => {
+    if (hasSlideNext && onSlideNext) onSlideNext()
+    else if (hasNext) onNext()
+  }
 
   return (
     <div
@@ -118,12 +222,12 @@ export function MediaLightbox({
       <button className="profile-view-lightbox-close" onClick={onClose} type="button" aria-label="Close">
         ✕
       </button>
-      {hasPrev ? (
+      {canGoSidePrev ? (
         <button
           className="profile-view-lightbox-nav prev"
           onClick={(event) => {
             event.stopPropagation()
-            onPrev()
+            goSidePrev()
           }}
           type="button"
           aria-label="Previous"
@@ -133,23 +237,29 @@ export function MediaLightbox({
       ) : null}
       <div className="profile-view-lightbox-stage" onClick={(event) => event.stopPropagation()}>
         {title ? <div className="profile-view-lightbox-title">{title}</div> : null}
+        {meta ? <div className="profile-view-lightbox-meta">{meta}</div> : null}
         {isVideo ? (
-          // TikTok-style: o vídeo repete sozinho ao terminar.
           <video ref={videoRef} src={convertFileSrc(fileAbsPath)} controls autoPlay loop />
         ) : (
           <img src={convertFileSrc(fileAbsPath)} alt="" />
         )}
         {!isVideo && audioAbsPath ? (
-          <audio src={convertFileSrc(audioAbsPath)} controls autoPlay loop />
+          <audio
+            key={audioAbsPath}
+            src={convertFileSrc(audioAbsPath)}
+            controls
+            autoPlay
+            loop
+          />
         ) : null}
         {actions ? <div className="profile-view-lightbox-actions">{actions}</div> : null}
       </div>
-      {hasNext ? (
+      {canGoSideNext ? (
         <button
           className="profile-view-lightbox-nav next"
           onClick={(event) => {
             event.stopPropagation()
-            onNext()
+            goSideNext()
           }}
           type="button"
           aria-label="Next"

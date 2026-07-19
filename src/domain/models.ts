@@ -604,6 +604,9 @@ export interface MediaGalleryPost {
   shareCount?: number
   statsUpdatedAt?: string
   files: MediaGalleryFile[]
+  /** Slideshow/carousel soundtrack (TikTok photo-mode), when present on disk. */
+  audioRelativePath?: string
+  audioAbsolutePath?: string
 }
 
 export interface MigrationStatus {
