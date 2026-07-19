@@ -108,6 +108,16 @@ pub fn backups_folder_path() -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn open_backups_folder(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let backups_dir = backups_folder_path()?;
+    app.opener()
+        .open_path(backups_dir, None::<&str>)
+        .map_err(|error| format!("Could not open the backups folder: {error}"))
+}
+
+#[tauri::command]
 pub fn bootstrap_workspace(app: tauri::AppHandle) -> Result<WorkspaceSnapshot, String> {
     connector_runtime::register_app_handle(&app);
     let snapshot = publish_snapshot(&app, workspace_repository::bootstrap_workspace()?)?;

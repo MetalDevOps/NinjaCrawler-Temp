@@ -2912,8 +2912,7 @@ export async function subscribeToMigrationCompletion(
 }
 
 export async function openBackupsFolder(): Promise<void> {
-  const path = await invoke<string>('backups_folder_path')
-  await openPath(path)
+  await invoke<void>('open_backups_folder')
 }
 
 export async function loadSourceDeleteQueueStatus(): Promise<SourceDeleteQueueStatus> {

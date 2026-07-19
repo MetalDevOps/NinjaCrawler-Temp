@@ -50,6 +50,7 @@ pub fn run() {
             application::commands::get_migration_status,
             application::commands::run_pending_migrations,
             application::commands::backups_folder_path,
+            application::commands::open_backups_folder,
             application::commands::bootstrap_workspace,
             application::commands::load_workspace_health,
             application::commands::media_dedupe_status,
