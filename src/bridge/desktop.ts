@@ -121,6 +121,7 @@ import type {
   SyncPlanUpsert,
   WorkspaceSnapshot,
   WorkspaceHealthSnapshot,
+  WorkspaceHealthWindowIntent,
 } from '../domain/models'
 import { createEmptyWorkspaceSnapshot } from '../domain/workspaceSnapshot'
 
@@ -164,6 +165,7 @@ const DESKTOP_PLANS_WINDOW_INTENT_EVENT_NAME = 'runtime://plans-window-intent'
 const DESKTOP_BATCH_EDITOR_WINDOW_INTENT_EVENT_NAME = 'runtime://batch-editor-window-intent'
 const DESKTOP_RUNTIME_LOG_APPENDED_EVENT_NAME = 'runtime://runtime-log-appended'
 const DESKTOP_RUNTIME_LOG_INTENT_EVENT_NAME = 'runtime://runtime-log-window-intent'
+const DESKTOP_WORKSPACE_HEALTH_INTENT_EVENT_NAME = 'runtime://workspace-health-window-intent'
 const DESKTOP_CONNECTOR_DEBUG_APPENDED_EVENT_NAME = 'runtime://connector-debug-appended'
 const DESKTOP_FOCUS_SOURCE_EVENT_NAME = 'runtime://focus-source'
 const RUNTIME_LOG_TIMEOUT_MS = 5000
@@ -2939,8 +2941,20 @@ export async function subscribeToRuntimeLogWindowIntent(
   })
 }
 
-export async function openWorkspaceHealthWindow(): Promise<void> {
-  await invoke<void>('open_workspace_health_window')
+export async function openWorkspaceHealthWindow(intent?: WorkspaceHealthWindowIntent): Promise<void> {
+  await invoke<void>('open_workspace_health_window', intent ? { intent } : undefined)
+}
+
+export async function subscribeToWorkspaceHealthWindowIntent(
+  handler: (intent: WorkspaceHealthWindowIntent) => void,
+): Promise<() => void> {
+  return listen(DESKTOP_WORKSPACE_HEALTH_INTENT_EVENT_NAME, (event) => {
+    if (!isRecord(event.payload)) return
+    const initialTab = optionalStringValue(event.payload, ['initialTab', 'initial_tab'])
+    if (initialTab === 'overview' || initialTab === 'sources' || initialTab === 'accounts' || initialTab === 'storage') {
+      handler({ initialTab })
+    }
+  })
 }
 
 export async function openConnectorDebugWindow(): Promise<void> {

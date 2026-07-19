@@ -25,6 +25,7 @@ import {
   openSourceFolder,
   runSourceSync,
   subscribeToDesktopRuntimeEvents,
+  subscribeToWorkspaceHealthWindowIntent,
   validateProviderAccount,
 } from "../../bridge/desktop";
 import type {
@@ -36,6 +37,7 @@ import type {
   WorkspaceHealthIncident,
   WorkspaceHealthSeverity,
   WorkspaceHealthSnapshot,
+  WorkspaceHealthWindowIntent,
 } from "../../domain/models";
 import { WindowShell } from "../brand/WindowShell";
 import { WindowTitlebar } from "../brand/WindowTitlebar";
@@ -195,7 +197,7 @@ function handleTabKeyDown(
   );
 }
 
-function Progress({ status }: { status: MediaDedupeJobStatus }) {
+function Progress({ status, scopeLabel }: { status: MediaDedupeJobStatus; scopeLabel: string }) {
   const active = ["queued", "scanning", "applying"].includes(status.state);
   if (!active) return null;
   const sourcePhase = status.stage === "perceptual_scan";
@@ -296,7 +298,7 @@ function Progress({ status }: { status: MediaDedupeJobStatus }) {
         </small>
       </div>
       <div className="health-progress-metrics">
-        <span>{providerLabel(status.providerScope)}</span>
+        <span>{scopeLabel}</span>
         <span>Similarity within source</span>
         <span>{resourceProfile[0].toUpperCase() + resourceProfile.slice(1)}</span>
         <span>{formatDuration(status.elapsedSeconds ?? 0)} elapsed</span>
@@ -316,10 +318,14 @@ function Progress({ status }: { status: MediaDedupeJobStatus }) {
   );
 }
 
-export function WorkspaceHealthWindowPage() {
+export function WorkspaceHealthWindowPage({
+  initialIntent,
+}: {
+  initialIntent?: WorkspaceHealthWindowIntent;
+}) {
   const [health, setHealth] = useState<WorkspaceHealthSnapshot>();
   const [dedupe, setDedupe] = useState<MediaDedupeJobStatus>();
-  const [tab, setTab] = useState<HealthTab>("overview");
+  const [tab, setTab] = useState<HealthTab>(initialIntent?.initialTab ?? "overview");
   const [selectedIncident, setSelectedIncident] =
     useState<WorkspaceHealthIncident>();
   const [loading, setLoading] = useState(true);
@@ -377,6 +383,15 @@ export function WorkspaceHealthWindowPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+    void subscribeToWorkspaceHealthWindowIntent((intent) => {
+      if (intent.initialTab) setTab(intent.initialTab);
+    }).then((value) => {
+      unsubscribe = value;
+    }).catch(() => undefined);
+    return () => unsubscribe?.();
+  }, []);
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState !== "hidden") void refresh(true);
@@ -1163,6 +1178,16 @@ function Storage({
   const selectedSourceCount = health.sources.filter(
     (source) => provider === "all" || source.provider === provider,
   ).length;
+  const scopedSourceId = dedupe?.sourceScope ?? scan?.sourceScope;
+  const scopedSource = scopedSourceId
+    ? health.sources.find((source) => source.sourceId === scopedSourceId)
+    : undefined;
+  const scopeLabel = scopedSource
+    ? `${displayHandle(scopedSource.handle)} · ${providerLabel(scopedSource.provider)}`
+    : providerLabel(dedupe?.providerScope ?? scan?.providerScope);
+  const activeSourceScopeValue = active && dedupe?.sourceScope
+    ? `source:${dedupe.sourceScope}`
+    : undefined;
   return (
     <div
       aria-labelledby="health-tab-storage"
@@ -1187,8 +1212,11 @@ function Storage({
                 aria-label="Media scan provider"
                 disabled={active || busyAction === "scan"}
                 onChange={(event) => onProvider(event.target.value)}
-                value={provider}
+                value={activeSourceScopeValue ?? provider}
               >
+                {activeSourceScopeValue ? (
+                  <option value={activeSourceScopeValue}>{scopeLabel} (profile)</option>
+                ) : null}
                 <option value="all">Entire library</option>
                 {availableProviders.map((value) => (
                   <option key={value} value={value}>
@@ -1207,7 +1235,7 @@ function Storage({
                     event.target.value as MediaDedupeResourceProfile,
                   )
                 }
-                value={resourceProfile}
+                value={active ? dedupe?.resourceProfile ?? resourceProfile : resourceProfile}
               >
                 <option value="quiet">Quiet</option>
                 <option value="balanced">Balanced</option>
@@ -1263,7 +1291,7 @@ function Storage({
             <span>Visual similarity within each source</span>
           </div>
         ) : null}
-        <Progress status={dedupe ?? idleDedupeStatus} />
+        <Progress status={dedupe ?? idleDedupeStatus} scopeLabel={scopeLabel} />
         {dedupe ? (
           <details
             className="health-runtime-disclosure"
@@ -1275,14 +1303,19 @@ function Storage({
                 <strong>Scan engine &amp; media tools</strong>
                 <small>
                   {similarityEngine.installed && similarityEngine.ffmpegAvailable
-                    ? `Ready · VDF ${similarityEngine.version} · FFmpeg ${similarityEngine.ffmpegVersion ?? "detected"} (${similarityEngine.ffmpegSource === "managed" ? "Managed" : "System"})`
-                    : "Setup requires attention"}
+                    ? `Ready · VDF ${similarityEngine.version} · FFmpeg ${similarityEngine.ffmpegVersion ?? "detected"} (${similarityEngine.ffmpegSource === "managed" ? "Managed" : "System"}) · Click to review`
+                    : "Setup requires attention · Click to manage"}
                 </small>
               </span>
-              <span className={`status ${similarityEngine.installed && similarityEngine.ffmpegAvailable ? "status-ready" : "status-attention"}`}>
-                {similarityEngine.installed && similarityEngine.ffmpegAvailable
-                  ? "Ready"
-                  : "Attention"}
+              <span className="health-runtime-disclosure-affordance">
+                <span className={`status ${similarityEngine.installed && similarityEngine.ffmpegAvailable ? "status-ready" : "status-attention"}`}>
+                  {similarityEngine.installed && similarityEngine.ffmpegAvailable
+                    ? "Ready"
+                    : "Attention"}
+                </span>
+                <svg aria-hidden="true" className="health-runtime-chevron" viewBox="0 0 20 20">
+                  <path d="m6 8 4 4 4-4" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" />
+                </svg>
               </span>
             </summary>
             <div className="health-runtime-details">
@@ -1447,7 +1480,7 @@ function Storage({
                 {scan.finishedAt ? ` ${formatDate(scan.finishedAt)}` : ""}
               </span>
               <small>
-                {providerLabel(scan.providerScope)} · read-only · no files changed
+                {scopeLabel} · read-only · no files changed
               </small>
             </div>
             <div className="health-scan-summary">

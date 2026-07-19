@@ -10,7 +10,8 @@ use tauri_plugin_window_state::{StateFlags, WindowExt};
 
 use crate::domain::models::{
     AccountsWindowIntent, DesktopRuntimeState, PlanEditorWindowIntent, RuntimeLogWindowIntent,
-    RuntimeLogWindowStatus, SourceEditorWindowIntent, WorkspaceSnapshot,
+    RuntimeLogWindowStatus, SourceEditorWindowIntent, WorkspaceHealthWindowIntent,
+    WorkspaceSnapshot,
 };
 
 #[derive(Clone, Serialize)]
@@ -39,6 +40,7 @@ pub const SOURCE_EDITOR_WINDOW_INTENT_EVENT: &str = "runtime://source-editor-win
 pub const PROFILE_EDITOR_WINDOW_INTENT_EVENT: &str = "runtime://profile-editor-window-intent";
 pub const PLANS_WINDOW_INTENT_EVENT: &str = "runtime://plans-window-intent";
 pub const BATCH_EDITOR_WINDOW_INTENT_EVENT: &str = "runtime://batch-editor-window-intent";
+pub const WORKSPACE_HEALTH_WINDOW_INTENT_EVENT: &str = "runtime://workspace-health-window-intent";
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const ACCOUNTS_WINDOW_LABEL: &str = "accounts";
@@ -449,17 +451,25 @@ pub fn open_source_sync_queue_window(app: &tauri::AppHandle) -> Result<(), Strin
     Ok(())
 }
 
-pub fn open_workspace_health_window(app: &tauri::AppHandle) -> Result<(), String> {
+pub fn open_workspace_health_window(
+    app: &tauri::AppHandle,
+    intent: Option<WorkspaceHealthWindowIntent>,
+) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(WORKSPACE_HEALTH_WINDOW_LABEL) {
         window.show().map_err(|error| error.to_string())?;
         window.unminimize().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
+        if let Some(intent_payload) = intent {
+            window
+                .emit(WORKSPACE_HEALTH_WINDOW_INTENT_EVENT, intent_payload)
+                .map_err(|error| error.to_string())?;
+        }
         return Ok(());
     }
 
     let app_handle = app.clone();
     std::thread::spawn(move || {
-        if let Err(error) = create_workspace_health_window(&app_handle) {
+        if let Err(error) = create_workspace_health_window(&app_handle, intent) {
             eprintln!("[workspace-health] failed to create window: {error}");
         }
     });
@@ -788,11 +798,14 @@ fn create_source_sync_queue_window(app: &tauri::AppHandle) -> Result<(), String>
     )
 }
 
-fn create_workspace_health_window(app: &tauri::AppHandle) -> Result<(), String> {
+fn create_workspace_health_window(
+    app: &tauri::AppHandle,
+    intent: Option<WorkspaceHealthWindowIntent>,
+) -> Result<(), String> {
     let window = tauri::WebviewWindowBuilder::new(
         app,
         WORKSPACE_HEALTH_WINDOW_LABEL,
-        tauri::WebviewUrl::App(workspace_health_entrypoint().into()),
+        tauri::WebviewUrl::App(workspace_health_entrypoint(intent.as_ref()).into()),
     )
     .title("Workspace Health")
     .inner_size(1240.0, 820.0)
@@ -1417,8 +1430,17 @@ fn source_sync_queue_entrypoint() -> String {
     "queue-status.html".to_string()
 }
 
-fn workspace_health_entrypoint() -> String {
-    "workspace-health.html".to_string()
+fn workspace_health_entrypoint(intent: Option<&WorkspaceHealthWindowIntent>) -> String {
+    let initial_tab = intent
+        .and_then(|value| value.initial_tab.as_deref())
+        .filter(|value| matches!(*value, "overview" | "sources" | "accounts" | "storage"));
+    match initial_tab {
+        Some(value) => format!(
+            "workspace-health.html?initialTab={}",
+            encode_query_component(value)
+        ),
+        None => "workspace-health.html".to_string(),
+    }
 }
 
 fn profile_view_entrypoint(source_id: &str) -> String {

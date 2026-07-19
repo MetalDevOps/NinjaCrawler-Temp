@@ -397,6 +397,12 @@ pub struct AccountsWindowIntent {
     pub initial_mode: Option<String>,
 }
 
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceHealthWindowIntent {
+    pub initial_tab: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceEditorSeedIntent {

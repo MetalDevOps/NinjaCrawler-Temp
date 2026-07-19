@@ -38,6 +38,10 @@ export interface AccountsWindowIntent {
   initialMode?: 'create' | 'edit'
 }
 
+export interface WorkspaceHealthWindowIntent {
+  initialTab?: 'overview' | 'sources' | 'accounts' | 'storage'
+}
+
 export interface SourceEditorSeedIntent {
   provider: ProviderKey
   handle: string

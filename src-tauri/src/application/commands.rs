@@ -12,7 +12,7 @@ use crate::domain::models::{
     SetSyncPlanPauseInput, SkipSyncPlanInput, SourceAvailabilityCheckResult,
     SourceDeleteQueueStatus, SourceEditorWindowIntent, SourceProfileDeleteInput,
     SourceProfileUpsert, SourceSyncQueueStatus, SyncPlanTargetPreview, SyncPlanTargetPreviewInput,
-    SyncPlanUpsert, WorkspaceHealthSnapshot, WorkspaceSnapshot,
+    SyncPlanUpsert, WorkspaceHealthSnapshot, WorkspaceHealthWindowIntent, WorkspaceSnapshot,
 };
 use crate::infrastructure::{
     app_update, companion_install, connector_debug, connector_runtime, database, desktop_runtime,
@@ -940,8 +940,11 @@ pub fn open_source_sync_queue_window(app: tauri::AppHandle) -> Result<(), String
 }
 
 #[tauri::command]
-pub fn open_workspace_health_window(app: tauri::AppHandle) -> Result<(), String> {
-    desktop_runtime::open_workspace_health_window(&app)
+pub fn open_workspace_health_window(
+    app: tauri::AppHandle,
+    intent: Option<WorkspaceHealthWindowIntent>,
+) -> Result<(), String> {
+    desktop_runtime::open_workspace_health_window(&app, intent)
 }
 
 #[tauri::command]

@@ -26,6 +26,7 @@ const bridgeMocks = vi.hoisted(() => ({
   openSourceFolder: vi.fn(),
   runSourceSync: vi.fn(),
   subscribeToDesktopRuntimeEvents: vi.fn(),
+  subscribeToWorkspaceHealthWindowIntent: vi.fn(),
   validateProviderAccount: vi.fn(),
 }));
 
@@ -139,6 +140,9 @@ describe("WorkspaceHealthWindowPage", () => {
     bridgeMocks.subscribeToDesktopRuntimeEvents.mockResolvedValue(
       () => undefined,
     );
+    bridgeMocks.subscribeToWorkspaceHealthWindowIntent.mockResolvedValue(
+      () => undefined,
+    );
     bridgeMocks.enqueueMediaDedupeScan.mockResolvedValue({});
     bridgeMocks.installMediaDedupeSimilarityEngine.mockResolvedValue({});
     bridgeMocks.installMediaToolRuntime.mockResolvedValue({});
@@ -193,6 +197,17 @@ describe("WorkspaceHealthWindowPage", () => {
       resourceProfile: "balanced",
     });
     expect(screen.getByText(/no scan has been run/i)).toBeTruthy();
+  });
+
+  it("opens directly on Storage & Cleanup when launched from Profile View", async () => {
+    render(<WorkspaceHealthWindowPage initialIntent={{ initialTab: "storage" }} />);
+
+    expect(
+      await screen.findByRole("heading", { name: /find duplicate media/i }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("tab", { name: /storage & cleanup/i }).getAttribute("aria-selected"),
+    ).toBe("true");
   });
 
   it("limits a media scan to the selected provider", async () => {
