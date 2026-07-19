@@ -10,10 +10,8 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaDedupeFile, WorkspaceHealthSnapshot } from "../../domain/models";
-import {
-  pickBestDedupeFile,
-  WorkspaceHealthWindowPage,
-} from "./WorkspaceHealthWindowPage";
+import { pickBestDedupeFile } from "./pickBestDedupeFile";
+import { WorkspaceHealthWindowPage } from "./WorkspaceHealthWindowPage";
 
 const bridgeMocks = vi.hoisted(() => ({
   applyMediaDedupe: vi.fn(),
