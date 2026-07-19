@@ -33,7 +33,7 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 thread::spawn(move || {
                     thread::sleep(Duration::from_millis(1500));
-                    let _ = application::commands::open_runtime_log_window(app_handle);
+                    let _ = application::commands::open_runtime_log_window(app_handle, None);
                 });
             }
             Ok(())
@@ -50,7 +50,15 @@ pub fn run() {
             application::commands::get_migration_status,
             application::commands::run_pending_migrations,
             application::commands::backups_folder_path,
+            application::commands::open_backups_folder,
             application::commands::bootstrap_workspace,
+            application::commands::load_workspace_health,
+            application::commands::media_dedupe_status,
+            application::commands::install_media_dedupe_similarity_engine,
+            application::commands::install_media_tool_runtime,
+            application::commands::enqueue_media_dedupe_scan,
+            application::commands::cancel_media_dedupe,
+            application::commands::apply_media_dedupe,
             application::commands::prepare_connector_runtimes,
             application::commands::check_connector_updates,
             application::commands::update_connector_runtime,
@@ -144,6 +152,7 @@ pub fn run() {
             application::commands::open_scheduler_window,
             application::commands::open_plans_window,
             application::commands::open_source_sync_queue_window,
+            application::commands::open_workspace_health_window,
             application::commands::open_profile_view_window,
             application::commands::open_connector_runtimes_window,
             application::commands::open_single_videos_window,

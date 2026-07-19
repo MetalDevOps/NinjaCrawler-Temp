@@ -20,18 +20,17 @@ use crate::domain::models::{
 };
 use crate::domain::models::{
     AccountSyncRun, AppSetting, AppSettingUpsert, AvatarThumbnail, AvatarThumbnailBatch,
-    BatchSourceProfilePatch, CloneSyncPlanInput,
-    CompanionAccountCandidate, CompanionAccountCapture, CompanionAccountImportInput,
-    CompanionAccountImportResult, CompanionAccountPreview, DesktopRuntimeState,
-    ImportMethodDescriptor, ImportPreview, ImportPreviewOptions, ImportPreviewProfile,
-    ImportPreviewSummary, ImportProblem, ImportProviderDescriptor, ImportRootDescriptor,
-    ImportRunProfileResult, ImportRunRequest, ImportRunResult, InstagramNamingLedgerBackfillResult,
-    InstagramSourceSyncOptions, MediaGalleryFile, MediaGalleryPost,
-    MediaThumbnailBatch, MoveSyncPlanInput, ProviderAccount, ProviderAccountCookie,
-    ProviderAccountCookieImport, ProviderAccountEditor, ProviderAccountImportState,
-    ProviderAccountSession, ProviderAccountSettingValue, ProviderAccountSettingValueKind,
-    ProviderAccountUpsert, RunSyncPlanNowInput, RuntimeLogContext, RuntimeLogEntry,
-    RuntimeLogQuery, SchedulerGroup, SchedulerGroupUpsert, SchedulerPlanCriteria,
+    BatchSourceProfilePatch, CloneSyncPlanInput, CompanionAccountCandidate,
+    CompanionAccountCapture, CompanionAccountImportInput, CompanionAccountImportResult,
+    CompanionAccountPreview, DesktopRuntimeState, ImportMethodDescriptor, ImportPreview,
+    ImportPreviewOptions, ImportPreviewProfile, ImportPreviewSummary, ImportProblem,
+    ImportProviderDescriptor, ImportRootDescriptor, ImportRunProfileResult, ImportRunRequest,
+    ImportRunResult, InstagramNamingLedgerBackfillResult, InstagramSourceSyncOptions,
+    MediaGalleryFile, MediaGalleryPost, MediaThumbnailBatch, MoveSyncPlanInput, ProviderAccount,
+    ProviderAccountCookie, ProviderAccountCookieImport, ProviderAccountEditor,
+    ProviderAccountImportState, ProviderAccountSession, ProviderAccountSettingValue,
+    ProviderAccountSettingValueKind, ProviderAccountUpsert, RunSyncPlanNowInput, RuntimeLogContext,
+    RuntimeLogEntry, RuntimeLogQuery, SchedulerGroup, SchedulerGroupUpsert, SchedulerPlanCriteria,
     SchedulerPlanNotifications, SchedulerSet, SchedulerSetUpsert, SetSyncPlanPauseInput,
     SingleVideo, SingleVideoFile, SkipSyncPlanInput, SourceAvailabilityCheckItem,
     SourceAvailabilityCheckResult, SourceMediaGallery, SourceProfile, SourceProfileDeleteMode,
@@ -42,7 +41,7 @@ use crate::domain::models::{
 use crate::infrastructure::runtime_log::RuntimeLogAnchor;
 use crate::infrastructure::storage::StorageLayout;
 use crate::infrastructure::{
-    connector_debug, connector_runtime, database, instagram_connector, runtime_log,
+    connector_debug, connector_runtime, database, instagram_connector, media_tool_runtime, runtime_log,
     session_secret_store, source_sync_runtime, storage, tiktok_connector, tiktok_likes_runtime,
     twitter_connector,
 };
@@ -54,8 +53,10 @@ use crate::providers;
 mod accounts;
 mod avatar;
 mod gallery;
+mod health;
 mod import;
 mod media;
+mod media_dedupe;
 mod options;
 mod paths;
 mod scheduler;
@@ -66,8 +67,10 @@ mod sync;
 pub use accounts::*;
 pub use avatar::*;
 pub use gallery::*;
+pub use health::*;
 pub use import::*;
 pub use media::*;
+pub(crate) use media_dedupe::*;
 pub(crate) use options::*;
 use paths::*;
 pub use scheduler::*;
@@ -449,7 +452,10 @@ fn settings_bootstrap_paths() -> &'static Mutex<HashSet<PathBuf>> {
 /// roda uma vez por arquivo por processo (chave por path preserva o suite
 /// hermético). `resolve_effective_storage_layout` continua por chamada porque
 /// o media_root pode mudar em runtime.
-fn ensure_settings_bootstrap(connection: &Connection, layout: &StorageLayout) -> Result<(), String> {
+fn ensure_settings_bootstrap(
+    connection: &Connection,
+    layout: &StorageLayout,
+) -> Result<(), String> {
     let key = layout
         .db_path
         .canonicalize()
@@ -2131,16 +2137,24 @@ fn load_instagram_deleted_post_keys(
     connection: &Connection,
     source_id: &str,
 ) -> Result<HashSet<String>, String> {
+    load_provider_deleted_post_keys(connection, "instagram", source_id)
+}
+
+fn load_provider_deleted_post_keys(
+    connection: &Connection,
+    provider: &str,
+    source_id: &str,
+) -> Result<HashSet<String>, String> {
     ensure_provider_deleted_media_table(connection)?;
     let mut statement = connection
         .prepare(
             "SELECT provider_post_key, provider_post_code
              FROM provider_deleted_media
-             WHERE provider = 'instagram' AND source_id = ?1",
+             WHERE provider = ?1 AND source_id = ?2",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![source_id], |row| {
+        .query_map(params![provider, source_id], |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -2151,7 +2165,11 @@ fn load_instagram_deleted_post_keys(
     for row in rows {
         let (post_key, post_code) = row.map_err(|error| error.to_string())?;
         for value in [post_key, post_code].into_iter().flatten() {
-            let normalized = normalize_instagram_post_ledger_key(&value);
+            let normalized = if provider.eq_ignore_ascii_case("instagram") {
+                normalize_instagram_post_ledger_key(&value)
+            } else {
+                value.trim().to_ascii_lowercase()
+            };
             if !normalized.is_empty() {
                 keys.insert(normalized);
             }
