@@ -253,6 +253,40 @@ fn derive_post_metadata_tiktok_slideshow_groups_by_post() {
 }
 
 #[test]
+fn derive_review_item_post_url_resolves_tiktok_from_file_name() {
+    assert_eq!(
+        derive_review_item_post_url(
+            "tiktok",
+            "gaaby.tls",
+            "gaaby.tls_1775147243_7624199329925958920.mp4",
+        )
+        .as_deref(),
+        Some("https://www.tiktok.com/@gaaby.tls/video/7624199329925958920")
+    );
+}
+
+#[test]
+fn derive_review_item_post_url_is_none_for_instagram_file_names() {
+    // Instagram shortcodes only live in the ledger, never in the file name, so
+    // the file-name-only review path can't recover them — the review item
+    // simply has no link (front falls back to the profile).
+    assert_eq!(
+        derive_review_item_post_url("instagram", "someone", "2024-01-01 12.00.00 photo.jpg"),
+        None
+    );
+}
+
+#[test]
+fn derive_review_item_post_url_never_links_twitter_from_file_name() {
+    // Twitter file names carry the media key / autonumber, not the status id;
+    // a name-derived numeric token would build a WRONG /status/ link.
+    assert_eq!(
+        derive_review_item_post_url("twitter", "someone", "someone_1234567890123456789.mp4"),
+        None
+    );
+}
+
+#[test]
 fn build_post_url_tiktok_video_vs_photo_and_profile() {
     assert_eq!(
         build_post_url(
@@ -453,6 +487,25 @@ fn single_video_display_path_uses_requested_tiktok_photo_index() {
 }
 
 #[test]
+fn find_slideshow_audio_discovers_post_id_audio_next_to_images() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let root = temp_dir.path();
+    let images = vec![MediaGalleryFile {
+        relative_path: "a_0.jpeg".to_string(),
+        absolute_path: root.join("a_0.jpeg").to_string_lossy().to_string(),
+        media_type: "image".to_string(),
+    }];
+    fs::write(root.join("7658099397019831573_audio.m4a"), b"audio").expect("audio");
+
+    let (relative, absolute) =
+        find_slideshow_audio(root, &images, Some("7658099397019831573"));
+    assert_eq!(relative.as_deref(), Some("7658099397019831573_audio.m4a"));
+    assert!(absolute
+        .as_deref()
+        .is_some_and(|path| path.ends_with("7658099397019831573_audio.m4a")));
+}
+
+#[test]
 fn single_video_slideshow_paths_exclude_audio_but_audio_is_discovered() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let root = temp_dir.path();
@@ -633,6 +686,8 @@ fn extract_post_tombstone_keys_per_provider() {
         share_count: None,
         stats_updated_at: None,
         files: Vec::new(),
+        audio_relative_path: None,
+        audio_absolute_path: None,
     };
     // TikTok: usa o post id.
     assert_eq!(
