@@ -1,6 +1,6 @@
 [package]
 name = "ninjacrawler"
-version = "0.26.0" # x-release-please-version
+version = "0.27.0" # x-release-please-version
 description = "Local-first desktop crawler manager"
 authors = ["MetalDevOps"]
 edition = "2021"
@@ -38,6 +38,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 sha2 = "0.10"
 tempfile = "3"
 trash = "5"
+fs2 = "0.4"
+same-file = "1"
 argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.8"
